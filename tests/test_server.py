@@ -163,6 +163,40 @@ class ServerTest(unittest.TestCase):
         self.assertTrue(r["fragments"])
         self.assertTrue(r["fragments"][0]["relevant"])
 
+    def stream(self, body):
+        req = urllib.request.Request(self.base + "/api/chat", data=json.dumps({**body, "stream": True}).encode(),
+                                     headers={"Content-Type": "application/json"})
+        with urllib.request.urlopen(req, timeout=30) as r:
+            return r.headers["Content-Type"], [json.loads(line) for line in r if line.strip()]
+
+    def test_chat_streams_answer_by_pieces(self):
+        from unittest import mock
+        llm = self.server.llm
+        calls = []
+
+        def fake_stream(msgs, max_tokens=None):
+            calls.append(max_tokens)
+            yield from pieces
+
+        with mock.patch.object(llm, "model", return_value="fake"), mock.patch.object(llm, "chat_stream", fake_stream):
+            pieces = ["Подумай, ", "почему ", "уровень упал?"]
+            ctype, lines = self.stream({"message": "Почему высохло Аральское море?", "mode": "socratic", "level": 0})
+            self.assertIn("ndjson", ctype)
+            self.assertEqual([x["type"] for x in lines], ["meta", "delta", "delta", "delta", "done"])
+            self.assertTrue(lines[0]["fragments"])
+            self.assertEqual("".join(x["text"] for x in lines if x["type"] == "delta"), "".join(pieces))
+            self.assertEqual(lines[-1]["answer"], "Подумай, почему уровень упал?")
+            # Подсказка без вопроса заменяется проверенным шаблоном: answer = None.
+            pieces = ["Уровень упал из-за орошения."]
+            _, lines = self.stream({"message": "Почему высохло Аральское море?", "mode": "socratic", "level": 0})
+            self.assertIsNone(lines[-1]["answer"])
+            # Вопрос не по библиотеке — ответ «из знаний нейросети» с пометкой general.
+            pieces = ["Из-за рассеяния света."]
+            _, lines = self.stream({"message": "Почему небо голубое?", "mode": "socratic", "level": 0})
+            self.assertTrue(lines[0]["general"])
+            self.assertEqual(lines[-1]["answer"], "Из-за рассеяния света.")
+        self.assertEqual(calls, [160, 160, 350], "подсказка короче объяснения")
+
     def test_teacher_endpoints_need_pin(self):
         self.assertEqual(self.status("/api/settings", {"exam": True}), 403)
         self.assertEqual(self.status("/api/graphs", {"graph": {"nodes": [1], "edges": [1]}}), 403)

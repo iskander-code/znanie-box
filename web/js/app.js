@@ -1,7 +1,7 @@
 import { simulate, pathTo, findLoops, checkPredictions, trend, DEFAULT_DELAY_LABELS } from './engine.js';
 import { renderGraph, esc } from './graph-view.js';
 import { Library, localAnswer, makeQuiz, checkQuiz, RELEVANT } from './tutor-local.js';
-import { detectBrowserLLM, chatBrowser, tutorMessages, generalMessages, DEBRIEF } from './llm-browser.js';
+import { detectBrowserLLM, warmUpBrowserLLM, chatBrowser, chatBrowserStream, readNDJSON, tutorMessages, generalMessages, DEBRIEF } from './llm-browser.js';
 import { themeSwitcher, applyTheme, setTheme, currentTheme, reduceMotion, speak } from './a11y.js';
 import { login, getToken, setToken, recordLocal, localSummary, resetLocalStats, localExam, setLocalExam } from './teacher.js';
 import { qrSVG } from './qr.js';
@@ -66,7 +66,15 @@ async function boot() {
   renderStatus();
   if (!S.server) {
     // Сайт открыт не с коробки: пробуем Ollama на этом компьютере, не задерживая загрузку.
-    detectBrowserLLM().then((m) => { if (m) { S.browserLLM = m; renderStatus(); route(); } });
+    detectBrowserLLM().then(async (m) => {
+      if (!m) return;
+      S.browserLLM = m;
+      renderStatus();
+      route();
+      // Загружаем модель заранее, чтобы первый вопрос не ждал загрузки; без видеокарты берём модель побыстрее.
+      const best = await warmUpBrowserLLM(m);
+      if (best !== S.browserLLM) { S.browserLLM = best; renderStatus(); }
+    });
   }
   window.addEventListener('hashchange', route);
   route();
@@ -241,6 +249,41 @@ function renderMsg(m, i) {
   return `<div class="msg ${m.role}">${say}${esc(m.text).replace(/\n/g, '<br>')}${sources || graph ? `<div class="row">${sources}${graph}</div>` : ''}${by}</div>`;
 }
 
+// Предел длины ответа (как на коробке): подсказка короткая, объяснение длиннее.
+const MAX_TOKENS = { hint: 160, answer: 350, general: 350 };
+
+/** Ответ печатается в пузыре «Сова думает…» по мере готовности — не чаще раза в 60 мс (бережём слабые устройства). */
+function liveBubble() {
+  let text = '';
+  let raf = 0;
+  const paint = () => {
+    raf = 0;
+    const el = document.querySelector('#messages .typing');
+    if (!el) return;
+    el.classList.add('live');
+    el.textContent = text;
+    const box = document.getElementById('messages');
+    box.scrollTop = box.scrollHeight;
+  };
+  return (piece) => { text += piece; if (!raf) raf = setTimeout(paint, 60); };
+}
+
+/** Вопрос коробке с ответом по мере печати. Старый сервер или ответ без нейросети приходит обычным JSON. */
+async function chatServer(body, onDelta) {
+  const r = await fetch('api/chat', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ ...body, stream: true }) });
+  if (!r.ok) throw new Error((await r.json().catch(() => ({}))).error || `Ошибка ${r.status}`);
+  if (!r.headers.get('content-type')?.includes('ndjson') || !r.body) return r.json();
+  let meta = {};
+  let answer = null;
+  await readNDJSON(r, (line) => {
+    if (line.type === 'meta') meta = line;
+    else if (line.type === 'delta') onDelta(line.text);
+    else if (line.type === 'done') answer = line.answer;
+    else if (line.type === 'error') throw new Error(line.error);
+  });
+  return { ...meta, answer };
+}
+
 const GENERAL_LABEL = (model) => `⚠ нейросеть ${model}: ответ не из библиотеки — проверь у учителя или в учебнике`;
 
 async function askSova(question, level, mode = S.chat.mode) {
@@ -252,7 +295,7 @@ async function askSova(question, level, mode = S.chat.mode) {
   try {
     if (S.server) {
       const history = c.messages.slice(-7, -1).map((m) => ({ role: m.role, content: m.text }));
-      const r = await postJSON('api/chat', { message: question, mode, level, grade: c.grade, history });
+      const r = await chatServer({ message: question, mode, level, grade: c.grade, history }, liveBubble());
       if ('exam' in r && r.exam !== S.exam) { S.exam = !!r.exam; renderStatus(); }
       if (r.exam) { mode = 'socratic'; level = Math.min(level, Number(r.level ?? 1)); }
       if (r.answer && r.model === 'контрольная') {
@@ -270,7 +313,8 @@ async function askSova(question, level, mode = S.chat.mode) {
     } else if (S.browserLLM && RELEVANT(S.lib.search(question))) {
       const fragments = S.lib.search(question);
       const history = c.messages.slice(-7, -1).map((m) => ({ role: m.role, content: m.text }));
-      const text = await chatBrowser(S.browserLLM, tutorMessages({ message: question, mode, level, grade: c.grade, history, fragments: fragments.slice(0, 3) }));
+      const hint = mode === 'socratic' && level < 2;
+      const text = await chatBrowserStream(S.browserLLM, tutorMessages({ message: question, mode, level, grade: c.grade, history, fragments: fragments.slice(0, 3) }), liveBubble(), MAX_TOKENS[hint ? 'hint' : 'answer']);
       if (mode === 'socratic' && level < 2 && !text.includes('?')) {
         // Модель выдала ответ вместо наводящего вопроса — показываем проверенную подсказку-шаблон.
         reply = { ...localAnswer({ message: question, mode, level, fragments }), by: 'подсказка-шаблон' };
@@ -280,7 +324,7 @@ async function askSova(question, level, mode = S.chat.mode) {
     } else if (S.browserLLM) {
       // В библиотеке ничего нет — отвечает нейросеть из своих знаний, с пометкой.
       const history = c.messages.slice(-7, -1).map((m) => ({ role: m.role, content: m.text }));
-      const text = await chatBrowser(S.browserLLM, generalMessages({ message: question, grade: c.grade, history }));
+      const text = await chatBrowserStream(S.browserLLM, generalMessages({ message: question, grade: c.grade, history }), liveBubble(), MAX_TOKENS.general);
       reply = { text, sources: [], graph: null, by: GENERAL_LABEL(S.browserLLM), general: true };
     } else {
       reply = { ...localAnswer({ message: question, mode, level, fragments: S.lib.search(question) }), by: 'без нейросети' };
@@ -530,7 +574,7 @@ async function debriefWithSova() {
       const res = await postJSON('api/chat', { mode: 'debrief', context });
       x.debrief = res.answer || 'Нейросеть сейчас недоступна.';
     } else {
-      x.debrief = await chatBrowser(S.browserLLM, [{ role: 'system', content: DEBRIEF }, { role: 'user', content: JSON.stringify(context) }]);
+      x.debrief = await chatBrowser(S.browserLLM, [{ role: 'system', content: DEBRIEF }, { role: 'user', content: JSON.stringify(context) }], 400);
     }
   } catch (e) {
     x.debrief = `Не получилось: ${e.message}`;

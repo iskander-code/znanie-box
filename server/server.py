@@ -73,6 +73,9 @@ MODES = {
     ("explain", 0): "Объясни ответ полностью по фрагментам и предложи ученику пересказать его своими словами.",
     ("simpler", 0): "Объясни как ученику 5 класса, одним коротким примером из сельской жизни (огород, ферма, речка, сельский магазин).",
 }
+# Предел длины ответа в токенах: подсказка короткая, объяснение длиннее. Обычные ответы короче предела,
+# он лишь не даёт модели «заговориться» — на слабом устройстве это десятки секунд.
+MAX_TOKENS = {"hint": 160, "answer": 350, "general": 350, "debrief": 400}
 DEBRIEF = (
     "Ты — Сова, наставник школьника. Ученик сделал прогноз и запустил симуляцию причинно-следственной схемы. "
     "Разбери результат по-русски, не больше 7 предложений. Похвали верные догадки. Для каждой ошибки объясни "
@@ -230,7 +233,7 @@ class Handler(SimpleHTTPRequestHandler):
             if not llm.model():
                 return self._json({"answer": None, "llm": False})
             msgs = [{"role": "system", "content": DEBRIEF}, {"role": "user", "content": json.dumps(body.get("context", {}), ensure_ascii=False)[:8000]}]
-            return self._json({"answer": llm.chat(msgs), "llm": True})
+            return self._json({"answer": llm.chat(msgs, max_tokens=MAX_TOKENS["debrief"]), "llm": True})
         fragments = LIB.search(str(body.get("message", "")))
         relevant = is_relevant(fragments)
         for f in fragments:
@@ -248,18 +251,55 @@ class Handler(SimpleHTTPRequestHandler):
                 return self._json({"fragments": [], "answer": EXAM_GENERAL, "exam": True, "llm": bool(llm.model()), "model": "контрольная"})
         if not llm.model():
             return self._json({"fragments": fragments, "answer": None, "llm": False, "exam": exam, "level": body.get("level", 0)})
+        stream = bool(body.get("stream"))
         if not relevant:
             # В библиотеке ничего нет — нейросеть отвечает из своих знаний, интерфейс помечает это.
             history = [m for m in body.get("history", [])[-6:] if m.get("role") in ("user", "assistant")]
             msgs = [{"role": "system", "content": GENERAL.format(grade=body.get("grade", 8))}, *history,
                     {"role": "user", "content": str(body.get("message", ""))[:1000]}]
-            answer = clean_answer(llm.chat(msgs))
-            return self._json({"fragments": [], "answer": answer, "general": True, "llm": True, "model": llm.model(), "exam": exam})
-        answer = clean_answer(llm.chat(tutor_messages(body, fragments[:3])))
-        if mode == "socratic" and int(body.get("level", 0)) < 2 and "?" not in answer:
-            # Модель выдала ответ вместо наводящего вопроса — отдаём проверенную подсказку-шаблон.
-            return self._json({"fragments": fragments, "answer": None, "llm": True, "exam": exam, "level": body.get("level", 0)})
-        return self._json({"fragments": fragments, "answer": answer, "llm": True, "model": llm.model(), "exam": exam})
+            meta = {"fragments": [], "general": True, "llm": True, "model": llm.model(), "exam": exam}
+            return self._answer(meta, msgs, MAX_TOKENS["general"], False, stream)
+        hint = mode == "socratic" and int(body.get("level", 0)) < 2
+        meta = {"fragments": fragments, "llm": True, "model": llm.model(), "exam": exam, "level": body.get("level", 0)}
+        return self._answer(meta, tutor_messages(body, fragments[:3]), MAX_TOKENS["hint" if hint else "answer"], hint, stream)
+
+    def _answer(self, meta: dict, msgs: list[dict], max_tokens: int, must_ask: bool, stream: bool):
+        """Ответ нейросети целиком (JSON) или по мере печати (NDJSON: meta → delta… → done).
+
+        must_ask: нужна подсказка-вопрос. Если модель выдала ответ без вопроса, answer = None —
+        интерфейс покажет проверенную подсказку-шаблон.
+        """
+        def final(text: str) -> str | None:
+            answer = clean_answer(text)
+            return None if must_ask and "?" not in answer else answer
+
+        if not stream:
+            return self._json({**meta, "answer": final(llm.chat(msgs, max_tokens=max_tokens))})
+        self.send_response(HTTPStatus.OK)
+        self.send_header("Content-Type", "application/x-ndjson; charset=utf-8")
+        self.send_header("Cache-Control", "no-store")
+        self.send_header("X-Accel-Buffering", "no")
+        self.end_headers()
+        self.close_connection = True
+
+        def send(obj: dict):
+            self.wfile.write(json.dumps(obj, ensure_ascii=False).encode("utf-8") + b"\n")
+            self.wfile.flush()
+
+        parts = []
+        try:
+            send({"type": "meta", **meta})
+            for piece in llm.chat_stream(msgs, max_tokens=max_tokens):
+                parts.append(piece)
+                send({"type": "delta", "text": piece})
+            send({"type": "done", "answer": final("".join(parts))})
+        except (BrokenPipeError, ConnectionResetError):
+            pass  # ученик закрыл страницу — генерация останавливается вместе с соединением
+        except Exception as e:  # noqa: BLE001 — ошибку нейросети показываем ученику понятным текстом
+            try:
+                send({"type": "error", "error": str(e)})
+            except OSError:
+                pass
 
     def _save_graph(self, body: dict):
         g = body.get("graph") or {}
@@ -290,8 +330,8 @@ def main():
             print(f"  с телефонов и планшетов класса: http://{a}:{args.port}")
     print(f"Нейросеть: {'включена, модель ' + st['model'] if st['llm'] else 'не найдена, наставник работает в демо-режиме'} ({st['mode']})")
     if st["llm"] and st["mode"] == "local":
-        # Прогрев: первая загрузка модели в память может занять минуту-две.
-        threading.Thread(target=lambda: llm.chat([{"role": "user", "content": "Привет"}]), daemon=True).start()
+        # Прогрев: первая загрузка модели в память может занять минуту-две; заодно выбираем модель под железо.
+        threading.Thread(target=llm.warm_up, daemon=True).start()
     try:
         server.serve_forever()
     except KeyboardInterrupt:

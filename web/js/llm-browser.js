@@ -56,14 +56,70 @@ export async function detectBrowserLLM() {
   }
 }
 
-export async function chatBrowser(model, messages) {
-  const r = await fetch(`${OLLAMA}/api/chat`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ model, messages, stream: false, keep_alive: '60m', options: { temperature: 0.3, num_ctx: 4096 }, ...(THINKING.test(model) ? { think: false } : {}) }),
-  });
+const body = (model, messages, stream, maxTokens) => JSON.stringify({
+  model, messages, stream, keep_alive: '60m',
+  options: { temperature: 0.3, num_ctx: 4096, ...(maxTokens ? { num_predict: maxTokens } : {}) },
+  ...(THINKING.test(model) ? { think: false } : {}),
+});
+
+export async function chatBrowser(model, messages, maxTokens) {
+  const r = await fetch(`${OLLAMA}/api/chat`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: body(model, messages, false, maxTokens) });
   if (!r.ok) throw new Error(`Ollama ответила ${r.status}`);
   return cleanAnswer((await r.json()).message.content);
+}
+
+/** Читает поток строк JSON (NDJSON) и вызывает onLine для каждой. */
+export async function readNDJSON(response, onLine) {
+  const reader = response.body.getReader();
+  const dec = new TextDecoder();
+  let buf = '';
+  for (;;) {
+    const { value, done } = await reader.read();
+    buf += dec.decode(value || new Uint8Array(), { stream: !done });
+    let i;
+    while ((i = buf.indexOf('\n')) >= 0) {
+      const line = buf.slice(0, i).trim();
+      buf = buf.slice(i + 1);
+      if (line) onLine(JSON.parse(line));
+    }
+    if (done) break;
+  }
+  if (buf.trim()) onLine(JSON.parse(buf));
+}
+
+/** Ответ по мере печати: onDelta получает каждый новый кусочек текста. Возвращает весь ответ. */
+export async function chatBrowserStream(model, messages, onDelta, maxTokens) {
+  const r = await fetch(`${OLLAMA}/api/chat`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: body(model, messages, true, maxTokens) });
+  if (!r.ok || !r.body) throw new Error(`Ollama ответила ${r.status}`);
+  let text = '';
+  await readNDJSON(r, (chunk) => {
+    if (chunk.error) throw new Error(chunk.error);
+    const piece = chunk.message?.content || '';
+    if (piece) { text += piece; onDelta(piece); }
+  });
+  return cleanAnswer(text);
+}
+
+// Без видеокарты модель поменьше отвечает в 2–2,5 раза быстрее.
+const FAST_CPU = 'qwen2.5:3b';
+
+/**
+ * Загружает модель в память заранее (первый вопрос не ждёт загрузки) и выбирает модель под железо:
+ * если видеокарты нет, а быстрая модель установлена — возвращает её. Возвращает имя модели.
+ */
+export async function warmUpBrowserLLM(model) {
+  try {
+    await chatBrowser(model, [{ role: 'user', content: 'Привет' }], 1);
+    const ps = await (await fetch(`${OLLAMA}/api/ps`)).json();
+    const onGpu = (ps.models || []).find((m) => m.name === model)?.size_vram > 0;
+    if (onGpu || model === FAST_CPU) return model;
+    const names = ((await (await fetch(`${OLLAMA}/api/tags`)).json()).models || []).map((m) => m.name);
+    if (!names.includes(FAST_CPU)) return model;
+    await chatBrowser(FAST_CPU, [{ role: 'user', content: 'Привет' }], 1);
+    return FAST_CPU;
+  } catch {
+    return model;
+  }
 }
 
 export function tutorMessages({ message, mode, level, grade, history, fragments }) {

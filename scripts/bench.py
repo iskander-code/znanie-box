@@ -25,7 +25,8 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "server"))
 from server import GENERAL, LIB, tutor_messages  # noqa: E402
 
-OLLAMA = "http://localhost:11434"
+# 127.0.0.1, а не localhost: в Windows localhost сначала пробует IPv6 и теряет ~2 с на каждом запросе.
+OLLAMA = "http://127.0.0.1:11434"
 QUESTIONS = [
     ("библиотека", "Почему высохло Аральское море?"),
     ("библиотека", "Что такое закон Ома?"),

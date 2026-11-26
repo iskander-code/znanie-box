@@ -324,3 +324,10 @@ section.step { margin: 14px 0; }
 .lab-card .muted { font-size: .88rem; }
 .lab-save { margin-top: 18px; }
 @media (max-width: 640px) { .lab-frame { aspect-ratio: 4 / 3; } }
+
+/* Ответ Совы печатается по мере готовности */
+.msg.typing.live { color: var(--ink); font-style: normal; white-space: pre-wrap; }
+.msg.typing.live::after { content: '▍'; color: var(--accent); margin-left: 1px; animation: caret 1s steps(1) infinite; }
+@keyframes caret { 50% { opacity: 0; } }
+:root[data-theme="a11y"] .msg.typing.live::after { animation: none; }
+@media (prefers-reduced-motion: reduce) { .msg.typing.live::after { animation: none; } }
