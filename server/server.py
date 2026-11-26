@@ -28,11 +28,19 @@ from rag import Library, is_relevant  # noqa: E402
 ROOT = Path(__file__).resolve().parent.parent
 WEB = ROOT / "web"
 USER_GRAPHS = ROOT / "data" / "user_graphs"
-LIB = Library(WEB / "data" / "texts.json")
+LIB = Library(WEB / "data" / "library")
 MAX_BODY = 200_000
 
+GENERAL = (
+    "Ты — Сова, доброжелательный наставник школьника {grade} класса в Казахстане. "
+    "В школьной библиотеке нет материала по этому вопросу, поэтому ответь из своих знаний. "
+    "Обращайся к ученику на «ты». Отвечай по-русски, понятно для его возраста, не больше 6 предложений. "
+    "Если не уверен в фактах, датах или числах — честно скажи об этом и посоветуй проверить в учебнике. "
+    "Не помогай с опасным, незаконным или взрослым содержанием: мягко откажи и посоветуй обратиться к учителю или родителям."
+)
+
 SYSTEM = (
-    "Ты — Сова, доброжелательный наставник школьника {grade} класса сельской школы. "
+    "Ты — Сова, доброжелательный наставник школьника {grade} класса в Казахстане. "
     "Обращайся к ученику на «ты». Отвечай по-русски, просто и коротко: не больше 5 предложений. "
     "Опирайся ТОЛЬКО на фрагменты из школьной библиотеки ниже. Если ответа в них нет, честно скажи: "
     "«В библиотеке этого нет, спроси учителя». Не выдумывай факты, даты и числа."
@@ -156,8 +164,15 @@ class Handler(SimpleHTTPRequestHandler):
         relevant = is_relevant(fragments)
         for f in fragments:
             f["relevant"] = relevant
-        if not relevant or not llm.model():
-            return self._json({"fragments": fragments, "answer": None, "llm": bool(llm.model())})
+        if not llm.model():
+            return self._json({"fragments": fragments, "answer": None, "llm": False})
+        if not relevant:
+            # В библиотеке ничего нет — нейросеть отвечает из своих знаний, интерфейс помечает это.
+            history = [m for m in body.get("history", [])[-6:] if m.get("role") in ("user", "assistant")]
+            msgs = [{"role": "system", "content": GENERAL.format(grade=body.get("grade", 8))}, *history,
+                    {"role": "user", "content": str(body.get("message", ""))[:1000]}]
+            answer = clean_answer(llm.chat(msgs))
+            return self._json({"fragments": [], "answer": answer, "general": True, "llm": True, "model": llm.model()})
         answer = clean_answer(llm.chat(tutor_messages(body, fragments[:3])))
         if mode == "socratic" and int(body.get("level", 0)) < 2 and "?" not in answer:
             # Модель выдала ответ вместо наводящего вопроса — отдаём проверенную подсказку-шаблон.

@@ -1,7 +1,7 @@
 import { simulate, pathTo, findLoops, checkPredictions, compareGraphs, trend, DEFAULT_DELAY_LABELS } from './engine.js';
 import { renderGraph, esc } from './graph-view.js';
 import { Library, localAnswer, makeQuiz, checkQuiz, RELEVANT } from './tutor-local.js';
-import { detectBrowserLLM, chatBrowser, tutorMessages, DEBRIEF } from './llm-browser.js';
+import { detectBrowserLLM, chatBrowser, tutorMessages, generalMessages, DEBRIEF } from './llm-browser.js';
 
 const app = document.getElementById('app');
 const S = {
@@ -33,9 +33,11 @@ const store = {
 
 // ---------- запуск ----------
 async function boot() {
-  const [texts, index] = await Promise.all([getJSON('data/texts.json'), getJSON('data/graphs/index.json')]);
-  S.texts = texts;
-  S.lib = new Library(texts);
+  const [subjects, index] = await Promise.all([getJSON('data/library/index.json'), getJSON('data/graphs/index.json')]);
+  S.subjects = subjects;
+  const parts = await Promise.all(subjects.map((s) => getJSON(`data/library/${s.id}.json`)));
+  S.texts = parts.flatMap((docs, i) => docs.map((d) => ({ ...d, subject: subjects[i].name, subjectId: subjects[i].id })));
+  S.lib = new Library(S.texts);
   S.graphs = await Promise.all(index.map((id) => getJSON(`data/graphs/${id}.json`)));
   try {
     const r = await fetch('api/health', { cache: 'no-store' });
@@ -83,14 +85,15 @@ function graphCards(target) {
 function viewHome() {
   app.innerHTML = `
   <section class="hero">
-    <h1>Библиотека, наставник и тренажёр мышления — без интернета</h1>
-    <p>Подключись к Wi-Fi «Школа-Знание» и учись с любого телефона. Наставник Сова не даёт готовых ответов: он помогает дойти до них самому и всегда показывает, откуда взята информация.</p>
+    <h1>Библиотека, наставник и тренажёр мышления для школ Казахстана — без интернета</h1>
+    <p>Подключись к Wi-Fi «Мектеп-Білім» и учись с любого телефона. Наставник Сова помогает дойти до ответа самому и показывает, откуда взята информация. Если в библиотеке ответа нет, Сова спросит нейросеть.</p>
   </section>
+  <div class="cards subjects">${S.subjects.map((s) => `<a class="card" href="#/library/${s.id}"><span class="icon">${s.icon}</span><strong>${esc(s.name)}</strong><span class="muted">${S.texts.filter((t) => t.subjectId === s.id).length} тем</span></a>`).join('')}</div>
   <div class="cards big">
     <a class="card" href="#/sova"><span class="icon">🦉</span><strong>Спросить Сову</strong><span class="muted">Наставник ответит по книгам из библиотеки: сначала подсказкой, потом полным ответом</span></a>
     <a class="card" href="#/explore"><span class="icon">🔀</span><strong>Что будет, если…</strong><span class="muted">Измени одно условие в параграфе и проследи цепочку последствий</span></a>
     <a class="card" href="#/build"><span class="icon">🧩</span><strong>Собери сам</strong><span class="muted">Построй схему причин и следствий сам и сравни с эталоном</span></a>
-    <a class="card" href="#/library"><span class="icon">📚</span><strong>Библиотека</strong><span class="muted">Параграфы и статьи, на которые опирается Сова</span></a>
+    <a class="card" href="#/library"><span class="icon">📚</span><strong>Библиотека</strong><span class="muted">${S.texts.length} тем по истории Казахстана, физике, алгебре и геометрии</span></a>
   </div>
   <h2>Схемы «Что будет, если…»</h2>
   ${graphCards('explore')}
@@ -116,14 +119,50 @@ function viewAI() {
 function viewLibrary(id) {
   const doc = id && S.texts.find((t) => t.id === id);
   if (doc) {
-    app.innerHTML = `<a class="back" href="#/library">← Библиотека</a>
-      <article class="doc"><span class="tag">${esc(doc.subject)} · ${doc.grade} класс</span><h1>${esc(doc.title)}</h1><p>${esc(doc.text)}</p></article>
-      <div class="row">${doc.graph ? `<a class="btn primary" href="#/explore/${doc.graph}">Открыть схему «Что будет, если…»</a>` : ''}
-      <button class="btn" data-action="ask-about" data-title="${esc(doc.title)}">Спросить Сову об этом</button></div>`;
+    const list = S.texts.filter((t) => t.subjectId === doc.subjectId);
+    const i = list.indexOf(doc);
+    app.innerHTML = `<a class="back" href="#/library/${doc.subjectId}">← ${esc(doc.subject)}</a>
+      <article class="doc"><span class="tag">${esc(doc.subject)} · ${doc.grade} класс · ${esc(doc.section)}</span><h1>${esc(doc.title)}</h1><p>${esc(doc.text)}</p></article>
+      <div class="row">${doc.graph ? `<a class="btn primary" href="#/explore/${doc.graph}">🔀 Схема «Что будет, если…»</a>` : ''}
+      <button class="btn" data-action="ask-about" data-title="${esc(doc.title)}">🦉 Спросить Сову об этом</button></div>
+      <div class="row pager">${i > 0 ? `<a class="btn ghost" href="#/library/${list[i - 1].id}">← ${esc(list[i - 1].title)}</a>` : ''}${i < list.length - 1 ? `<a class="btn ghost" href="#/library/${list[i + 1].id}">${esc(list[i + 1].title)} →</a>` : ''}</div>`;
     return;
   }
-  const group = (kind, title) => `<h2>${title}</h2><ul class="list">${S.texts.filter((t) => t.kind === kind).map((t) => `<li><a href="#/library/${t.id}">${esc(t.title)}</a> <span class="muted">${esc(t.subject)}</span></li>`).join('')}</ul>`;
-  app.innerHTML = `<h1>Библиотека</h1><p class="muted">В настоящей коробке здесь же открываются Википедия, видеоуроки и симуляторы через Kiwix. В прототипе — учебные тексты, по которым отвечает Сова.</p>${group('paragraph', 'Параграфы учебника')}${group('article', 'Статьи')}`;
+  const subject = id && S.subjects.find((s) => s.id === id);
+  if (subject) {
+    const L = (S.lf ||= { grade: 'all', q: '' });
+    const docs = S.texts.filter((t) => t.subjectId === id);
+    const grades = [...new Set(docs.map((d) => d.grade))].sort((a, b) => a - b);
+    app.innerHTML = `<a class="back" href="#/library">← Библиотека</a>
+      <h1>${subject.icon} ${esc(subject.name)}</h1>
+      <div class="toolbar">
+        <div class="seg">${['all', ...grades].map((g) => `<button class="${String(L.grade) === String(g) ? 'on' : ''}" data-action="lib-grade" data-g="${g}">${g === 'all' ? 'Все классы' : `${g} кл.`}</button>`).join('')}</div>
+        <input type="search" placeholder="Поиск по темам…" value="${esc(L.q)}" data-action-input="lib-q" aria-label="Поиск по темам">
+      </div>
+      <div id="lib-list"></div>`;
+    renderLibList(id);
+    return;
+  }
+  app.innerHTML = `<h1>Библиотека</h1>
+    <p class="muted">${S.texts.length} тем по школьной программе Казахстана. В настоящей коробке здесь же открываются Википедия, видеоуроки и симуляторы через Kiwix.</p>
+    <div class="cards subjects">${S.subjects.map((s) => {
+      const docs = S.texts.filter((t) => t.subjectId === s.id);
+      const g = docs.map((d) => d.grade);
+      return `<a class="card" href="#/library/${s.id}"><span class="icon">${s.icon}</span><strong>${esc(s.name)}</strong><span class="muted">${docs.length} тем · ${Math.min(...g)}–${Math.max(...g)} классы</span></a>`;
+    }).join('')}</div>`;
+}
+
+function renderLibList(subjectId) {
+  const L = S.lf;
+  const q = L.q.trim().toLowerCase();
+  const docs = S.texts.filter((t) => t.subjectId === subjectId && (L.grade === 'all' || String(t.grade) === String(L.grade))
+    && (!q || t.title.toLowerCase().includes(q) || t.text.toLowerCase().includes(q)));
+  const sections = [...new Map(docs.map((d) => [`${d.grade}|${d.section}`, d])).keys()];
+  document.getElementById('lib-list').innerHTML = docs.length ? sections.map((key) => {
+    const [grade, section] = key.split('|');
+    const items = docs.filter((d) => `${d.grade}|${d.section}` === key);
+    return `<h2>${esc(section)} <span class="muted small">${grade} класс</span></h2><ul class="topics">${items.map((d) => `<li><a href="#/library/${d.id}">${esc(d.title)}</a>${d.graph ? ' <span class="chip graph small">🔀 схема</span>' : ''}</li>`).join('')}</ul>`;
+  }).join('') : '<p class="muted">Ничего не найдено. Попробуй другое слово или спроси Сову.</p>';
 }
 
 // ---------- Сова ----------
@@ -140,12 +179,12 @@ function viewSova() {
     </div>
     <div class="messages" id="messages">
       ${c.messages.length ? '' : `<div class="msg assistant"><p>Привет! Я Сова. Спроси меня о том, что непонятно в параграфе. Например:</p>
-        <div class="row">${['Почему кораллы обесцвечиваются?', 'Почему крестьяне были недовольны реформой?', 'Что будет, если повысить ключевую ставку?'].map((q) => `<button class="chip" data-action="ask-example" data-q="${esc(q)}">${esc(q)}</button>`).join('')}</div></div>`}
+        <div class="row">${['Почему высохло Аральское море?', 'Кто основал Казахское ханство?', 'Что такое закон Ома?', 'Как найти дискриминант?', 'Чему равна сумма углов треугольника?'].map((q) => `<button class="chip" data-action="ask-example" data-q="${esc(q)}">${esc(q)}</button>`).join('')}</div></div>`}
       ${c.messages.map(renderMsg).join('')}
       ${c.busy ? '<div class="msg assistant typing">Сова думает…</div>' : ''}
     </div>
     ${last && !c.busy && last.kind === 'answer' ? `<div class="row actions">
-      ${last.level < 2 ? '<button class="btn" data-action="hint-more">Ещё подсказка</button><button class="btn" data-action="show-answer">Покажи ответ</button>' : ''}
+      ${last.level < 2 && !last.general ? '<button class="btn" data-action="hint-more">Ещё подсказка</button><button class="btn" data-action="show-answer">Покажи ответ</button>' : ''}
       <button class="btn" data-action="simpler">Объясни проще</button>
       <button class="btn ghost" data-action="report">Тут ошибка</button></div>` : ''}
     <form class="composer" data-form="chat">
@@ -165,6 +204,8 @@ function renderMsg(m) {
   return `<div class="msg ${m.role}">${esc(m.text).replace(/\n/g, '<br>')}${sources || graph ? `<div class="row">${sources}${graph}</div>` : ''}${by}</div>`;
 }
 
+const GENERAL_LABEL = (model) => `⚠ нейросеть ${model}: ответ не из библиотеки — проверь у учителя или в учебнике`;
+
 async function askSova(question, level, mode = S.chat.mode) {
   const c = S.chat;
   c.busy = true;
@@ -174,7 +215,9 @@ async function askSova(question, level, mode = S.chat.mode) {
     if (S.server) {
       const history = c.messages.slice(-7, -1).map((m) => ({ role: m.role, content: m.text }));
       const r = await postJSON('api/chat', { message: question, mode, level, grade: c.grade, history });
-      if (r.answer) {
+      if (r.answer && r.general) {
+        reply = { text: r.answer, sources: [], graph: null, by: GENERAL_LABEL(r.model), general: true };
+      } else if (r.answer) {
         const f = r.fragments || [];
         reply = { text: r.answer, sources: [...new Map(f.slice(0, 2).map((x) => [x.title, x])).values()], graph: f.find((x) => x.graph)?.graph || null, by: `нейросеть ${r.model}` };
       } else {
@@ -190,6 +233,11 @@ async function askSova(question, level, mode = S.chat.mode) {
       } else {
         reply = { text, sources: [...new Map(fragments.slice(0, 2).map((x) => [x.title, x])).values()], graph: fragments.find((x) => x.graph)?.graph || null, by: `нейросеть ${S.browserLLM}` };
       }
+    } else if (S.browserLLM) {
+      // В библиотеке ничего нет — отвечает нейросеть из своих знаний, с пометкой.
+      const history = c.messages.slice(-7, -1).map((m) => ({ role: m.role, content: m.text }));
+      const text = await chatBrowser(S.browserLLM, generalMessages({ message: question, grade: c.grade, history }));
+      reply = { text, sources: [], graph: null, by: GENERAL_LABEL(S.browserLLM), general: true };
     } else {
       reply = { ...localAnswer({ message: question, mode, level, fragments: S.lib.search(question) }), by: 'без нейросети' };
     }
@@ -542,6 +590,7 @@ async function extractGraph(text) {
 const actions = {
   'chat-mode': (d) => { S.chat.mode = d.mode; S.chat.quiz = null; viewSova(); },
   'ask-example': (d) => sendChat(d.q),
+  'lib-grade': (d) => { S.lf.grade = d.g; viewLibrary(location.hash.split('/')[2]); },
   'ask-about': (d) => { location.hash = '#/sova'; setTimeout(() => sendChat(`Расскажи про тему «${d.title}»`), 0); },
   'hint-more': () => askSova(S.chat.lastQuestion, Math.min(2, (S.chat.messages.at(-1).level || 0) + 1), 'socratic'),
   'show-answer': () => askSova(S.chat.lastQuestion, 2, 'socratic'),
@@ -612,6 +661,7 @@ app.addEventListener('input', (ev) => {
     document.getElementById('sw').textContent = sliderWord(v);
     drawExploreGraph();
   } else if (a === 't-title') S.teacher.graph.title = ev.target.value;
+  else if (a === 'lib-q') { S.lf.q = ev.target.value; renderLibList(location.hash.split('/')[2]); }
 });
 app.addEventListener('change', (ev) => {
   if (ev.target.dataset.actionChange === 'grade') { S.chat.grade = Number(ev.target.value); store.set('grade', S.chat.grade); }

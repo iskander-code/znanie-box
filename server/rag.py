@@ -6,6 +6,7 @@ web/js/tutor-local.js, чтобы сайт и сервер находили од
 from __future__ import annotations
 
 import json
+import math
 import re
 import sqlite3
 from pathlib import Path
@@ -17,7 +18,7 @@ STOP = set(
     "раз тоже себе под будет ж тогда кто этот того потому этого какой совсем ним здесь этом один почти мой тем чтобы "
     "нее сейчас были куда зачем всех никогда можно при наконец два об другой хоть после над больше тот через эти нас "
     "про всего них какая много разве три эту моя впрочем хорошо свою этой перед иногда лучше чуть том нельзя такой им "
-    "более всегда конечно всю между почему расскажи объясни скажи такое это".split()
+    "более всегда конечно всю между почему расскажи объясни скажи такое это сколько какой какая какие каким каков такие такая тому будут равна равно равен бывает значит делать нужно хочу знать".split()
 )
 WORD = re.compile(r"[а-яa-z0-9]+")
 SENT = re.compile(r"[^.!?]+[.!?]+(?:\s|$)")
@@ -41,9 +42,19 @@ def split_sentences(text: str) -> list[str]:
     return [s.strip() for s in SENT.findall(text)] or [text]
 
 
+def load_docs(library_dir: Path) -> list[dict]:
+    """Все темы из web/data/library: index.json перечисляет предметы, у каждого свой файл."""
+    library_dir = Path(library_dir)
+    docs = []
+    for subj in json.loads((library_dir / "index.json").read_text(encoding="utf-8")):
+        for d in json.loads((library_dir / f"{subj['id']}.json").read_text(encoding="utf-8")):
+            docs.append({**d, "subject": subj["name"], "subjectId": subj["id"]})
+    return docs
+
+
 class Library:
-    def __init__(self, texts_path: Path):
-        self.docs = json.loads(Path(texts_path).read_text(encoding="utf-8"))
+    def __init__(self, library_dir: Path):
+        self.docs = load_docs(library_dir)
         self.db = sqlite3.connect(":memory:", check_same_thread=False)
         self.db.execute("CREATE VIRTUAL TABLE chunks USING fts5(stems, text UNINDEXED, doc UNINDEXED)")
         rows = []
@@ -54,6 +65,14 @@ class Library:
                 rows.append((" ".join(tokens(text + " " + d["title"])), text, d["id"]))
         self.db.executemany("INSERT INTO chunks VALUES (?, ?, ?)", rows)
         self.by_id = {d["id"]: d for d in self.docs}
+        # Вес слова (IDF): редкие слова важнее. Слова, которого нет в библиотеке, — сильный знак, что тема не покрыта.
+        n = len(rows)
+        df: dict[str, int] = {}
+        for stems, _, _ in rows:
+            for t in set(stems.split()):
+                df[t] = df.get(t, 0) + 1
+        self.idf = {t: math.log(1 + (n - c + 0.5) / (c + 0.5)) for t, c in df.items()}
+        self.unknown_idf = 1.5 * math.log(1 + (n + 0.5) / 0.5)
 
     def search(self, query: str, k: int = 4) -> list[dict]:
         q = list(dict.fromkeys(tokens(query)))
@@ -64,6 +83,8 @@ class Library:
             "SELECT stems, text, doc, bm25(chunks) AS s FROM chunks WHERE chunks MATCH ? ORDER BY s LIMIT ?",
             (match, k),
         ).fetchall()
+        weight = {t: self.idf.get(t, self.unknown_idf) for t in q}
+        total = sum(weight.values())
         out = []
         for stems, text, doc_id, s in rows:
             doc = self.by_id[doc_id]
@@ -75,10 +96,11 @@ class Library:
                 "text": text,
                 # bm25() в SQLite отрицательный: чем меньше, тем лучше.
                 "score": round(-s * 3, 3),
-                "matched": round(sum(t in have for t in q) / len(q), 3),
+                # Доля «веса» слов вопроса, найденных во фрагменте.
+                "matched": round(sum(weight[t] for t in q if t in have) / total, 3),
             })
         return out
 
 
 def is_relevant(fragments: list[dict]) -> bool:
-    return bool(fragments) and fragments[0]["matched"] >= 0.34
+    return bool(fragments) and fragments[0]["matched"] >= 0.45

@@ -14,24 +14,27 @@ sys.path.insert(0, str(ROOT / "server"))
 from graphs import evidence_found, validate  # noqa: E402
 from rag import Library, is_relevant, stem  # noqa: E402
 
-TEXT = (ROOT / "web" / "data" / "texts.json")
+LIBRARY = ROOT / "web" / "data" / "library"
 
 
 class RagTest(unittest.TestCase):
     def setUp(self):
-        self.lib = Library(TEXT)
+        self.lib = Library(LIBRARY)
 
     def test_stem(self):
         self.assertEqual(stem("Температура"), "темпер")
         self.assertEqual(stem("ёлка"), "елка")
 
     def test_search_finds_relevant(self):
-        fr = self.lib.search("почему повышают ключевую ставку")
+        fr = self.lib.search("что такое закон Ома")
         self.assertTrue(is_relevant(fr))
-        self.assertIn(fr[0]["title"], {"Ключевая ставка и инфляция", "Инфляция"})
+        self.assertEqual(fr[0]["title"], "Закон Ома для участка цепи")
+        self.assertEqual(len(self.lib.docs), 400)
 
     def test_offtopic_is_not_relevant(self):
-        self.assertFalse(is_relevant(self.lib.search("рецепт борща со сметаной")))
+        for q in ("рецепт борща со сметаной", "Почему небо голубое?", "Сколько будет 2+2?"):
+            self.assertFalse(is_relevant(self.lib.search(q)), q)
+        self.assertTrue(is_relevant(self.lib.search("Почему высохло Аральское море?")))
 
 
 class GraphValidationTest(unittest.TestCase):
@@ -107,7 +110,7 @@ class ServerTest(unittest.TestCase):
         self.assertTrue(json.loads(raw)["ok"])
 
     def test_chat_returns_fragments(self):
-        r = self.post("/api/chat", {"message": "Почему крестьяне были недовольны?", "mode": "socratic", "level": 0})
+        r = self.post("/api/chat", {"message": "Кто основал Казахское ханство?", "mode": "socratic", "level": 0})
         self.assertTrue(r["fragments"])
         self.assertTrue(r["fragments"][0]["relevant"])
 

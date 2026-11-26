@@ -1,0 +1,25 @@
+{
+  "id": "linear", "title": "Линейная функция y = kx + b", "subject": "Алгебра", "grade": 7, "text": "a010",
+  "source": "Тема «Линейная функция»", "verified_by_teacher": true,
+  "delayLabels": ["сразу"],
+  "nodes": [
+    {"id": "k", "label": "Коэффициент k (при k > 0)", "adjustable": true},
+    {"id": "b", "label": "Число b", "adjustable": true},
+    {"id": "angle", "label": "Угол наклона прямой к оси Ox"},
+    {"id": "yint", "label": "Точка пересечения с осью Oy"},
+    {"id": "zero", "label": "Нуль функции x = −b/k"}
+  ],
+  "edges": [
+    {"from": "k", "to": "angle", "sign": 1, "strength": 3, "delay": 0, "evidence": "чем больше k, тем круче поднимается прямая и тем больше угол её наклона к оси Ox"},
+    {"from": "b", "to": "yint", "sign": 1, "strength": 3, "delay": 0, "evidence": "при увеличении b прямая сдвигается вверх"},
+    {"from": "b", "to": "zero", "sign": -1, "strength": 3, "delay": 0, "evidence": "при k > 0 с ростом b нуль функции сдвигается влево"}
+  ],
+  "scenarios": [
+    {"label": "Увеличили b", "changes": {"b": 0.6}},
+    {"label": "Увеличили k", "changes": {"k": 0.6}}
+  ],
+  "questions": [
+    "Нарисуй в тетради прямые y = x + 1 и y = x + 3. Где у них нуль функции? Совпадает ли это со схемой?",
+    "Что произойдёт с нулём функции при росте b, если k < 0? Почему схема подписана «при k > 0»?"
+  ]
+}

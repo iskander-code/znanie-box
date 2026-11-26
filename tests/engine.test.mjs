@@ -3,11 +3,12 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { simulate, pathTo, findLoops, checkPredictions, compareGraphs, trend } from '../web/js/engine.js';
-import { Library, localAnswer, makeQuiz, checkQuiz } from '../web/js/tutor-local.js';
+import { Library, localAnswer, makeQuiz, checkQuiz, RELEVANT } from '../web/js/tutor-local.js';
 
 const load = (p) => JSON.parse(readFileSync(new URL(p, import.meta.url), 'utf8'));
-const graphs = ['ocean', 'serfdom', 'keyrate'].map((id) => load(`../web/data/graphs/${id}.json`));
-const texts = load('../web/data/texts.json');
+const graphs = load('../web/data/graphs/index.json').map((id) => load(`../web/data/graphs/${id}.json`));
+const byId = (id) => graphs.find((g) => g.id === id);
+const texts = load('../web/data/library/index.json').flatMap((s) => load(`../web/data/library/${s.id}.json`).map((d) => ({ ...d, subject: s.name })));
 const chain = { id: 'c', nodes: [{ id: 'a' }, { id: 'b' }, { id: 'c' }], edges: [{ from: 'a', to: 'b', sign: -1, strength: 3, delay: 0 }, { from: 'b', to: 'c', sign: -1, strength: 3, delay: 1 }] };
 
 test('два ослабления подряд дают рост', () => {
@@ -24,31 +25,39 @@ test('изменение затухает по цепочке', () => {
 });
 
 test('петля обратной связи не зацикливается и находится', () => {
-  const ocean = graphs[0];
-  const r = simulate(ocean, { ice: -0.9 });
+  const loop = { nodes: [{ id: 'ice' }, { id: 'albedo' }, { id: 't' }], edges: [
+    { from: 't', to: 'ice', sign: -1, strength: 2, delay: 1 }, { from: 'ice', to: 'albedo', sign: 1, strength: 3, delay: 0 }, { from: 'albedo', to: 't', sign: -1, strength: 2, delay: 1 }] };
+  const r = simulate(loop, { ice: -0.9 });
   assert.ok(r.waves <= 8);
-  assert.equal(trend(r.total.t), 'up', 'меньше льда — теплее океан');
-  const loops = findLoops(ocean);
+  assert.equal(trend(r.total.t), 'up', 'меньше льда — теплее');
+  const loops = findLoops(loop);
   assert.equal(loops.length, 1);
   assert.equal(loops[0].type, 'reinforcing');
 });
 
-test('повышение ставки снижает инфляцию и рост экономики', () => {
-  const r = simulate(graphs[2], { rate: 0.7 });
-  assert.equal(trend(r.total.inflation), 'down');
-  assert.equal(trend(r.total.growth), 'down');
-  assert.equal(trend(r.total.ruble), 'up');
+test('Арал: больше забора воды — меньше рыболовства и здоровья, плотина поднимает уровень', () => {
+  const r = simulate(byId('aral'), { irrigation: 0.8 });
+  for (const n of ['inflow', 'level', 'fish', 'fishing', 'health']) assert.equal(trend(r.total[n]), 'down', n);
+  assert.equal(trend(r.total.salinity), 'up');
+  assert.equal(trend(simulate(byId('aral'), { dam: 0.7 }).total.level), 'up');
+});
+
+test('закон Ома: рост сопротивления уменьшает ток и нагрев', () => {
+  const r = simulate(byId('ohm'), { R: 0.6 });
+  assert.equal(trend(r.total.I), 'down');
+  assert.equal(trend(r.total.heat), 'down');
 });
 
 test('прогноз и сборка схемы сравниваются с эталоном', () => {
-  const r = simulate(graphs[0], { t: 0.6 });
-  const checks = checkPredictions(r, { fish: 'down', sea: 'down' });
+  const g = byId('tselina');
+  const r = simulate(g, { plow: 0.8 });
+  const checks = checkPredictions(r, { grain: 'up', share: 'down' });
   assert.deepEqual(checks.map((c) => c.correct), [true, false]);
-  const cmp = compareGraphs(graphs[0], [{ from: 't', to: 'o2', sign: -1 }, { from: 't', to: 'sea', sign: -1 }, { from: 'fish', to: 't', sign: 1 }]);
+  const cmp = compareGraphs(g, [{ from: 'plow', to: 'sown', sign: 1 }, { from: 'erosion', to: 'soil', sign: 1 }, { from: 'grain', to: 'plow', sign: 1 }]);
   assert.equal(cmp.correct.length, 1);
   assert.equal(cmp.wrongSign.length, 1);
   assert.equal(cmp.extra.length, 1);
-  assert.equal(cmp.missing.length, graphs[0].edges.length - 2);
+  assert.equal(cmp.missing.length, g.edges.length - 2);
 });
 
 test('каждая цитата в эталонных схемах есть в тексте параграфа', () => {
@@ -60,15 +69,30 @@ test('каждая цитата в эталонных схемах есть в �
   }
 });
 
+test('библиотека: ~100 тем на предмет, уникальные id', () => {
+  const counts = {};
+  for (const t of texts) counts[t.subject] = (counts[t.subject] || 0) + 1;
+  for (const n of Object.values(counts)) assert.ok(n >= 95, JSON.stringify(counts));
+  assert.equal(new Set(texts.map((t) => t.id)).size, texts.length);
+});
+
 test('Сова находит источник, наводит на мысль и честно отказывает', () => {
   const lib = new Library(texts);
-  const fr = lib.search('Почему кораллы обесцвечиваются?');
-  assert.ok(['Коралловые рифы', 'Потепление океана'].includes(fr[0].title));
-  const hint = localAnswer({ message: 'Почему кораллы обесцвечиваются?', mode: 'socratic', level: 0, fragments: fr });
+  const q = 'Почему высохло Аральское море?';
+  const fr = lib.search(q);
+  assert.equal(fr[0].title, 'Трагедия Аральского моря');
+  const hint = localAnswer({ message: q, mode: 'socratic', level: 0, fragments: fr });
   assert.match(hint.text, /причин/);
+  assert.equal(lib.search('Что такое закон Ома?')[0].title, 'Закон Ома для участка цепи');
   const none = localAnswer({ message: 'Кто выиграл чемпионат мира по футболу?', mode: 'socratic', level: 0, fragments: lib.search('Кто выиграл чемпионат мира по футболу?') });
   assert.match(none.text, /нет ответа/);
-  const quiz = makeQuiz(lib.search('инфляция цены'));
+  const quiz = makeQuiz(lib.search('дискриминант квадратного уравнения'));
   assert.ok(quiz.question.includes('_____'));
   assert.match(checkQuiz(quiz, quiz.answer), /Верно/);
+});
+
+test('вопросы вне библиотеки уходят нейросети, по темам — остаются в библиотеке', () => {
+  const lib = new Library(texts);
+  for (const q of ['Почему небо голубое?', 'Сколько будет 2+2?', 'Как готовить бешбармак?']) assert.equal(RELEVANT(lib.search(q)), false, q);
+  for (const q of ['Почему высохло Аральское море?', 'Кто такие саки?', 'Как найти дискриминант?', 'Как работает трансформатор?']) assert.equal(RELEVANT(lib.search(q)), true, q);
 });
