@@ -44,7 +44,7 @@ class GraphValidationTest(unittest.TestCase):
     def test_validate_drops_unsupported_edges(self):
         raw = {
             "title": "Вода",
-            "nodes": [{"id": "t", "label": "Температура"}, {"id": "o2", "label": "Кислород"}, {"id": "x", "label": "Солнце"}],
+            "nodes": [{"id": "t", "label": "Температура воды"}, {"id": "o2", "label": "Кислород"}, {"id": "x", "label": "Солнце"}],
             "edges": [
                 {"from": "t", "to": "o2", "sign": -1, "strength": 2, "delay": 0, "evidence": "Чем теплее вода, тем меньше кислорода"},
                 {"from": "x", "to": "t", "sign": 1, "strength": 2, "delay": 0, "evidence": "солнце нагревает воду летом"},
@@ -56,6 +56,23 @@ class GraphValidationTest(unittest.TestCase):
         self.assertEqual({n["id"] for n in g["nodes"]}, {"t", "o2"})
         self.assertTrue(g["nodes"][0].get("adjustable"))
         self.assertEqual(len(notes), 3)
+
+    def test_validate_drops_quote_about_other_factors(self):
+        text = ("Вырубка лесов уменьшает количество деревьев, которые поглощают углекислый газ. "
+                "Поэтому в атмосфере накапливается больше углекислого газа. Из-за эрозии почвы снижаются урожаи.")
+        raw = {
+            "title": "Лес",
+            "nodes": [{"id": "trees", "label": "Количество деревьев"}, {"id": "co2", "label": "Углекислый газ"},
+                      {"id": "erosion", "label": "Эрозия почвы"}, {"id": "crop", "label": "Урожайность"}],
+            "edges": [
+                {"from": "trees", "to": "co2", "sign": -1, "strength": 2, "delay": 0, "evidence": "уменьшает количество деревьев, которые поглощают углекислый газ"},
+                {"from": "co2", "to": "erosion", "sign": 1, "strength": 2, "delay": 0, "evidence": "в атмосфере накапливается больше углекислого газа"},
+                {"from": "erosion", "to": "crop", "sign": -1, "strength": 2, "delay": 1, "evidence": "Из-за эрозии почвы снижаются урожаи"},
+            ],
+        }
+        g, notes = validate(raw, text)
+        self.assertEqual([(e["from"], e["to"]) for e in g["edges"]], [("trees", "co2"), ("erosion", "crop")])
+        self.assertIn("обоих факторах", notes[0])
 
 
 class ServerTest(unittest.TestCase):

@@ -78,6 +78,25 @@ def evidence_found(evidence: str, text: str, threshold: float = 0.8) -> bool:
     return covered / len(ev) >= threshold and m.find_longest_match(0, len(tx), 0, len(ev)).size >= len(ev) * 0.5
 
 
+def _stems5(s: str) -> set[str]:
+    # Начало слова без окончания: «воды»/«вода» → «вод», «урожаи»/«урожайность» → «урожа».
+    return {w[: max(3, min(5, len(w) - 1))] for w in re.findall(r"[а-яa-z]+", s.lower().replace("ё", "е")) if len(w) > 3}
+
+
+def mentions(label: str, passage: str) -> bool:
+    """Фактор упомянут в отрывке: совпадает начало хотя бы одного значимого слова."""
+    return bool(_stems5(label) & _stems5(passage))
+
+
+def _context(evidence: str, text: str) -> str:
+    """Цитата вместе с предложением, в котором она стоит."""
+    ev = _norm(evidence)
+    for sent in re.findall(r"[^.!?]+[.!?]?", text):
+        if ev and (ev in _norm(sent) or _norm(sent) in ev):
+            return sent + " " + evidence
+    return evidence
+
+
 def validate(raw: dict, text: str) -> tuple[dict, list[str]]:
     """Чистит граф: убирает связи без цитаты, дубликаты, узлы-сироты. Возвращает граф и замечания."""
     notes: list[str] = []
@@ -98,8 +117,14 @@ def validate(raw: dict, text: str) -> tuple[dict, list[str]]:
             continue
         if (a, b) in pairs:
             continue
-        if not evidence_found(str(e.get("evidence", "")), text):
+        evidence = str(e.get("evidence", ""))
+        if not evidence_found(evidence, text):
             notes.append(f"Связь «{a}→{b}»: цитаты нет в тексте — убрана")
+            continue
+        labels = {n["id"]: n["label"] for n in nodes}
+        ctx = _context(evidence, text)
+        if not (mentions(labels[a], ctx) and mentions(labels[b], ctx)):
+            notes.append(f"Связь «{labels[a]} → {labels[b]}»: цитата не говорит об обоих факторах — убрана")
             continue
         pairs.add((a, b))
         edges.append({

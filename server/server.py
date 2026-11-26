@@ -13,6 +13,7 @@ import argparse
 import json
 import re
 import sys
+import threading
 from functools import partial
 from http import HTTPStatus
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
@@ -58,7 +59,11 @@ def tutor_messages(body: dict, fragments: list[dict]) -> list[dict]:
     context = "\n".join(f"[{f['title']}] {f['text']}" for f in fragments)
     system = SYSTEM.format(grade=body.get("grade", 8)) + "\n" + instruction + "\n\nФРАГМЕНТЫ:\n" + context
     history = [m for m in body.get("history", [])[-6:] if m.get("role") in ("user", "assistant")]
-    return [{"role": "system", "content": system}, *history, {"role": "user", "content": str(body.get("message", ""))[:1000]}]
+    question = str(body.get("message", ""))[:1000]
+    if mode == "socratic" and level < 2:
+        # Маленькие модели лучше слушаются правила, стоящего в конце запроса.
+        question += f"\n\n(Правило для Совы: НЕ отвечай на вопрос прямо. {instruction} Начни со слов «Подумай».)"
+    return [{"role": "system", "content": system}, *history, {"role": "user", "content": question}]
 
 
 class Handler(SimpleHTTPRequestHandler):
@@ -167,6 +172,9 @@ def main():
     st = llm.status()
     print(f"Знание в коробке: http://localhost:{args.port}")
     print(f"Нейросеть: {'включена, модель ' + st['model'] if st['llm'] else 'не найдена, наставник работает в демо-режиме'} ({st['mode']})")
+    if st["llm"] and st["mode"] == "local":
+        # Прогрев: первая загрузка модели в память может занять минуту-две.
+        threading.Thread(target=lambda: llm.chat([{"role": "user", "content": "Привет"}]), daemon=True).start()
     try:
         server.serve_forever()
     except KeyboardInterrupt:
