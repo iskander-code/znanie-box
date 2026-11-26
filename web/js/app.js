@@ -46,7 +46,8 @@ const store = {
 
 // ---------- запуск ----------
 async function boot() {
-  const [subjects, index] = await Promise.all([getJSON('data/library/index.json'), getJSON('data/graphs/index.json')]);
+  const [subjects, index, labs] = await Promise.all([getJSON('data/library/index.json'), getJSON('data/graphs/index.json'), getJSON('data/phet.json').catch(() => [])]);
+  S.labs = labs;
   S.subjects = subjects;
   const parts = await Promise.all(subjects.map((s) => getJSON(`data/library/${s.id}.json`)));
   S.texts = parts.flatMap((docs, i) => docs.map((d) => ({ ...d, subject: subjects[i].name, subjectId: subjects[i].id })));
@@ -95,7 +96,7 @@ function renderStatus() {
 function route() {
   const [view = '', id] = location.hash.replace(/^#\/?/, '').split('/');
   document.querySelectorAll('.nav a').forEach((a) => a.classList.toggle('active', a.dataset.view === (view || 'home')));
-  const views = { '': viewHome, sova: viewSova, explore: viewExplore, build: viewBuild, teacher: viewTeacher, library: viewLibrary, ai: viewAI, connect: viewConnect };
+  const views = { '': viewHome, sova: viewSova, explore: viewExplore, build: viewBuild, teacher: viewTeacher, library: viewLibrary, labs: viewLabs, ai: viewAI, connect: viewConnect };
   (views[view] || viewHome)(id ? decodeURIComponent(id) : undefined);
   window.scrollTo(0, 0);
 }
@@ -121,6 +122,7 @@ function viewHome() {
     <a class="card" href="#/sova"><span class="icon">🦉</span><strong>Спросить Сову</strong><span class="muted">Наставник ответит по книгам из библиотеки: сначала подсказкой, потом полным ответом</span></a>
     <a class="card" href="#/explore"><span class="icon">🔀</span><strong>Что будет, если…</strong><span class="muted">Измени одно условие в параграфе и проследи цепочку последствий</span></a>
     <a class="card" href="#/build"><span class="icon">🧩</span><strong>Собери сам</strong><span class="muted">Разбери параграф по фразам и собери схему причин и следствий</span></a>
+    <a class="card" href="#/labs"><span class="icon">🧪</span><strong>Опыты</strong><span class="muted">${S.labs.length} интерактивных лабораторий PhET по физике и математике: меняй условия и смотри, что выйдет</span></a>
     <a class="card" href="#/library"><span class="icon">📚</span><strong>Библиотека</strong><span class="muted">${S.texts.length} тем по истории Казахстана, физике, алгебре и геометрии</span></a>
     <a class="card" href="#/connect"><span class="icon">📱</span><strong>Как подключить Коробку</strong><span class="muted">4 простых шага и QR-код для телефонов класса</span></a>
   </div>
@@ -153,6 +155,7 @@ function viewLibrary(id) {
     app.innerHTML = `<a class="back" href="#/library/${doc.subjectId}">← ${esc(doc.subject)}</a>
       <article class="doc" id="doc"><span class="tag">${esc(doc.subject)} · ${doc.grade} класс · ${esc(doc.section)}</span><h1>${esc(doc.title)}</h1><p>${esc(doc.text)}</p></article>
       <div class="row"><button class="btn" data-action="speak-doc" aria-pressed="false">🔊 Озвучить текст</button>${doc.graph ? `<a class="btn primary" href="#/explore/${doc.graph}">🔀 Схема «Что будет, если…»</a>` : ''}
+      ${labsFor(doc.id).map((l) => `<a class="btn primary" href="#/labs/${esc(l.id)}">🧪 Опыт «${esc(l.title)}»</a>`).join('')}
       <button class="btn" data-action="ask-about" data-title="${esc(doc.title)}">🦉 Спросить Сову об этом</button></div>
       <div class="row pager">${i > 0 ? `<a class="btn ghost" href="#/library/${list[i - 1].id}">← ${esc(list[i - 1].title)}</a>` : ''}${i < list.length - 1 ? `<a class="btn ghost" href="#/library/${list[i + 1].id}">${esc(list[i + 1].title)} →</a>` : ''}</div>`;
     return;
@@ -688,6 +691,94 @@ function buildCheck() {
   document.getElementById('bd-feedback')?.scrollIntoView({ block: 'nearest', behavior: reduceMotion() ? 'auto' : 'smooth' });
 }
 
+// ---------- опыты PhET ----------
+// Симуляции PhET (Университет Колорадо, CC BY 4.0) лежат в web/phet/ и открываются без интернета.
+const LAB_SUBJECTS = { physics: '⚡ Физика', algebra: '𝑥 Алгебра', geometry: '△ Геометрия' };
+const PHET_CREDIT = 'Симуляции <a href="https://phet.colorado.edu/ru/" target="_blank" rel="noopener">PhET Interactive Simulations</a>, Университет Колорадо в Боулдере, лицензия <a href="https://creativecommons.org/licenses/by/4.0/deed.ru" target="_blank" rel="noopener">CC BY 4.0</a>.';
+const PHET_CACHE = 'znanie-phet';
+// yotta=false — симуляция не отправляет статистику разработчикам (Google Analytics и счётчик PhET);
+// allowLinks=false — из симуляции нельзя уйти по ссылке в интернет.
+const PHET_PARAMS = '?yotta=false&allowLinks=false';
+const labsFor = (docId) => (S.labs || []).filter((l) => l.topics.includes(docId));
+const labGrade = (l) => Math.min(...l.topics.map((t) => S.texts.find((d) => d.id === t)?.grade || 11));
+
+function viewLabs(id) {
+  const lab = id && S.labs.find((l) => l.id === id);
+  if (lab) {
+    const topics = lab.topics.map((t) => S.texts.find((d) => d.id === t)).filter(Boolean);
+    app.innerHTML = `
+    <a class="back" href="#/labs">← Все опыты</a>
+    <div class="ex-head"><h1>🧪 ${esc(lab.title)}</h1><span class="tag">${LAB_SUBJECTS[lab.subject]} · с ${labGrade(lab)} класса</span></div>
+    <div class="info lab-task"><strong>Попробуй:</strong> ${esc(lab.task)}</div>
+    <div class="lab-frame"><iframe id="lab-frame" src="phet/${esc(lab.id)}.html${PHET_PARAMS}" title="Симуляция «${esc(lab.title)}»" allow="fullscreen" allowfullscreen loading="lazy"></iframe></div>
+    <div class="row">
+      <button class="btn" data-action="lab-full">⛶ Во весь экран</button>
+      <a class="btn ghost" href="phet/${esc(lab.id)}.html${PHET_PARAMS}" target="_blank" rel="noopener">Открыть в отдельной вкладке</a>
+      <button class="btn" data-action="ask-about" data-title="${esc(topics[0]?.title || lab.title)}">🦉 Обсудить с Совой</button>
+    </div>
+    <h2>Темы в библиотеке</h2>
+    <div class="row">${topics.map((d) => `<a class="chip" href="#/library/${d.id}">${esc(d.title)} · ${d.grade} кл.</a>`).join('')}</div>
+    <p class="note">${PHET_CREDIT}</p>`;
+    return;
+  }
+  const f = (S.labFilter ||= 'all');
+  const list = S.labs.filter((l) => f === 'all' || l.subject === f).sort((a, b) => labGrade(a) - labGrade(b));
+  app.innerHTML = `
+  <h1>Опыты</h1>
+  <p class="muted">Интерактивные лаборатории: меняй условия и смотри, что получится. К каждому опыту есть задание и ссылки на темы библиотеки. Всё работает без интернета.</p>
+  <div class="row" role="group" aria-label="Предмет">
+    ${[['all', 'Все'], ...Object.entries(LAB_SUBJECTS)].map(([k, v]) => `<button class="chip${f === k ? ' graph' : ''}" data-action="lab-filter" data-f="${k}" aria-pressed="${f === k}">${v}</button>`).join('')}
+  </div>
+  <div class="cards">${list.map((l) => `
+    <a class="card lab-card" href="#/labs/${esc(l.id)}">
+      <span class="tag">${LAB_SUBJECTS[l.subject]} · с ${labGrade(l)} класса</span>
+      <strong>${esc(l.title)}</strong>
+      <span class="muted">${esc(l.task)}</span>
+    </a>`).join('')}</div>
+  ${S.server ? '' : `<section class="step lab-save">
+    <h3>📥 Сохранить опыты на это устройство</h3>
+    <p class="muted small">Обычно опыт сохраняется, когда его открывают в первый раз. Чтобы заранее сохранить все ${S.labs.length} (около 95 МБ), нажми кнопку, пока есть интернет.</p>
+    <button class="btn" data-action="labs-save" id="labs-save">Сохранить все опыты</button> <span id="labs-save-status" class="muted small" role="status"></span>
+  </section>`}
+  <p class="note">${PHET_CREDIT}</p>`;
+  if (!S.server) labsSavedCount().then((n) => {
+    const el = document.getElementById('labs-save-status');
+    if (el && n) el.textContent = n === S.labs.length ? '✓ Все опыты уже сохранены' : `Сохранено ${n} из ${S.labs.length}`;
+  });
+}
+
+async function labsSavedCount() {
+  if (!('caches' in window)) return 0;
+  try {
+    const c = await caches.open(PHET_CACHE);
+    const keys = new Set((await c.keys()).map((r) => new URL(r.url).pathname.split('/').pop()));
+    return S.labs.filter((l) => keys.has(`${l.id}.html`)).length;
+  } catch { return 0; }
+}
+
+async function saveAllLabs(btn) {
+  const status = document.getElementById('labs-save-status');
+  if (!('caches' in window)) { status.textContent = 'Этот браузер не умеет сохранять файлы для работы без интернета.'; return; }
+  btn.disabled = true;
+  const c = await caches.open(PHET_CACHE);
+  let ok = 0;
+  let failed = 0;
+  for (const l of S.labs) {
+    const url = new URL(`phet/${l.id}.html`, location.href).href;
+    try {
+      if (!(await c.match(url))) {
+        const r = await fetch(url, { cache: 'no-store' });
+        if (!r.ok) throw new Error(r.status);
+        await c.put(url, r);
+      }
+      ok++;
+    } catch { failed++; }
+    status.textContent = `Сохранено ${ok} из ${S.labs.length}…`;
+  }
+  status.textContent = failed ? `Сохранено ${ok} из ${S.labs.length}. Остальные не скачались — проверь интернет и нажми ещё раз.` : '✓ Все опыты сохранены: теперь они откроются без интернета';
+  btn.disabled = false;
+}
+
 // ---------- кабинет учителя ----------
 function viewTeacher() {
   const t = S.teacher;
@@ -909,6 +1000,9 @@ const actions = {
   'close-info': () => { S.ex.info = null; S.ex.highlight = null; drawExploreGraph(); drawPanel(); },
   debrief: debriefWithSova,
   reset: () => { const id = S.ex.graphId; S.ex = null; viewExplore(id); },
+  'lab-filter': (d) => { S.labFilter = d.f; viewLabs(); },
+  'lab-full': () => { const f = document.getElementById('lab-frame'); (f.requestFullscreen || f.webkitRequestFullscreen)?.call(f); },
+  'labs-save': (d, el) => saveAllLabs(el),
   'bd-pick': (d) => {
     const b = S.bd;
     const v = d.f === 'sign' ? Number(d.id) : d.id;

@@ -1,6 +1,9 @@
 // Офлайн-режим: после первого открытия сайт целиком хранится на устройстве
 // и работает без интернета. Список файлов проверяется тестом (tests/engine.test.mjs).
-const VERSION = 'znanie-v3';
+const VERSION = 'znanie-v4';
+// Опыты PhET (≈95 МБ) не скачиваются заранее: каждый сохраняется при первом открытии
+// или по кнопке «Сохранить все опыты». Их кэш не очищается при обновлении сайта.
+const PHET = 'znanie-phet';
 const FILES = [
   './',
   'data/graphs/aral.json',
@@ -14,6 +17,7 @@ const FILES = [
   'data/library/history.json',
   'data/library/index.json',
   'data/library/physics.json',
+  'data/phet.json',
   'icon.svg',
   'index.html',
   'js/a11y.js',
@@ -34,7 +38,7 @@ self.addEventListener('install', (event) => {
 
 self.addEventListener('activate', (event) => {
   event.waitUntil(
-    caches.keys().then((keys) => Promise.all(keys.filter((k) => k !== VERSION).map((k) => caches.delete(k))))
+    caches.keys().then((keys) => Promise.all(keys.filter((k) => k !== VERSION && k !== PHET).map((k) => caches.delete(k))))
       .then(() => self.clients.claim()),
   );
 });
@@ -44,6 +48,22 @@ self.addEventListener('fetch', (event) => {
   const req = event.request;
   const url = new URL(req.url);
   if (req.method !== 'GET' || url.origin !== self.location.origin || url.pathname.includes('/api/')) return;
+  if (url.pathname.includes('/phet/')) {
+    // Опыт: сохранённая копия, иначе скачиваем и сохраняем. Большие файлы в фоне не перекачиваем.
+    event.respondWith((async () => {
+      const cache = await caches.open(PHET);
+      const cached = await cache.match(req, { ignoreSearch: true });
+      if (cached) return cached;
+      try {
+        const res = await fetch(req);
+        if (res.ok) cache.put(req, res.clone());
+        return res;
+      } catch {
+        return new Response('<!doctype html><meta charset="utf-8"><body style="font:16px system-ui;padding:24px">Этот опыт ещё не сохранён на устройстве. Открой его один раз, когда будет интернет или подключение к Коробке.</body>', { status: 503, headers: { 'Content-Type': 'text/html; charset=utf-8' } });
+      }
+    })());
+    return;
+  }
   event.respondWith((async () => {
     const cache = await caches.open(VERSION);
     const cached = await cache.match(req, { ignoreSearch: true })

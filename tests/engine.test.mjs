@@ -1,7 +1,7 @@
 // Запуск: node --test tests/
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { readFileSync } from 'node:fs';
+import { readFileSync, readdirSync } from 'node:fs';
 import { simulate, pathTo, findLoops, checkPredictions, compareGraphs, trend } from '../web/js/engine.js';
 import { Library, localAnswer, makeQuiz, checkQuiz, RELEVANT } from '../web/js/tutor-local.js';
 
@@ -98,12 +98,12 @@ test('вопросы вне библиотеки уходят нейросети
 });
 
 test('офлайн-режим: в кэш service worker входят все файлы сайта', async () => {
-  const { readdirSync, statSync } = await import('node:fs');
+  const { statSync } = await import('node:fs');
   const { join, relative, sep } = await import('node:path');
   const { fileURLToPath } = await import('node:url');
   const web = fileURLToPath(new URL('../web/', import.meta.url));
   const walk = (d) => readdirSync(d).flatMap((f) => (statSync(join(d, f)).isDirectory() ? walk(join(d, f)) : [join(d, f)]));
-  const files = walk(web).map((f) => relative(web, f).split(sep).join('/')).filter((f) => !['sw.js', '.nojekyll'].includes(f));
+  const files = walk(web).map((f) => relative(web, f).split(sep).join('/')).filter((f) => !['sw.js', '.nojekyll'].includes(f) && !f.startsWith('phet/'));
   const sw = readFileSync(new URL('../web/sw.js', import.meta.url), 'utf8');
   for (const f of files) assert.ok(sw.includes(`'${f}'`), `файл ${f} не попадает в офлайн-кэш — добавь его в FILES в web/sw.js`);
 });
@@ -138,4 +138,54 @@ test('«Собери сам»: у каждой связи есть цитата,
     assert.ok(text, `${g.id}: нет параграфа`);
     for (const e of g.edges) assert.ok(e.evidence && text.includes(e.evidence.toLowerCase()), `${g.id}: ${e.from}→${e.to} — цитаты нет в тексте`);
   }
+});
+
+test('опыты PhET: у каждого есть файл и задание, темы существуют в библиотеке', () => {
+  const labs = load('../web/data/phet.json');
+  const ids = new Set(texts.map((d) => d.id));
+  const files = readdirSync(new URL('../web/phet/', import.meta.url)).filter((f) => f.endsWith('.html'));
+  assert.deepEqual(files.sort(), labs.map((l) => `${l.id}.html`).sort(), 'список web/phet/ и data/phet.json расходятся');
+  for (const l of labs) {
+    assert.ok(l.title && l.task && ['physics', 'algebra', 'geometry'].includes(l.subject), l.id);
+    for (const t of l.topics) assert.ok(ids.has(t), `${l.id}: нет темы ${t}`);
+  }
+});
+
+test('офлайн-кэш: опыты PhET сохраняются при первом открытии и переживают обновление сайта', async () => {
+  const code = readFileSync(new URL('../web/sw.js', import.meta.url), 'utf8');
+  const stores = new Map();
+  const cacheOf = (name) => {
+    if (!stores.has(name)) stores.set(name, new Map());
+    const m = stores.get(name);
+    const key = (r) => new URL(typeof r === 'string' ? r : r.url).pathname;
+    return { match: async (r) => m.get(key(r))?.clone(), put: async (r, res) => { m.set(key(r), res); }, addAll: async () => {} };
+  };
+  const handlers = {};
+  let online = true;
+  let fetches = 0;
+  const env = {
+    self: { location: { origin: 'http://box' }, addEventListener: (t, f) => { handlers[t] = f; }, skipWaiting() {}, clients: { claim: async () => {} } },
+    caches: { open: async (n) => cacheOf(n), keys: async () => [...stores.keys()], delete: async (n) => stores.delete(n) },
+    fetch: async () => { fetches++; if (!online) throw new Error('offline'); return new Response('<html>sim</html>', { status: 200 }); },
+  };
+  new Function('self', 'caches', 'fetch', code)(env.self, env.caches, env.fetch);
+  const open = async (url) => {
+    let p;
+    handlers.fetch({ request: { url, method: 'GET', mode: 'navigate' }, respondWith: (x) => { p = x; }, waitUntil() {} });
+    return p;
+  };
+  const first = await open('http://box/phet/ohms-law.html?yotta=false');
+  assert.equal(await first.text(), '<html>sim</html>');
+  online = false;
+  const again = await open('http://box/phet/ohms-law.html?yotta=false&allowLinks=false');
+  assert.equal(again.status, 200, 'сохранённый опыт открывается без сети');
+  assert.equal(fetches, 1, 'сохранённый опыт не перекачивается');
+  const missing = await open('http://box/phet/density.html');
+  assert.equal(missing.status, 503);
+  assert.match(await missing.text(), /ещё не сохранён/);
+  stores.set('znanie-old', new Map());
+  let done;
+  handlers.activate({ waitUntil: (p) => { done = p; } });
+  await done;
+  assert.ok(stores.has('znanie-phet') && !stores.has('znanie-old'), 'при обновлении сайта старый кэш удаляется, опыты остаются');
 });

@@ -316,3 +316,11 @@ section.step { margin: 14px 0; }
 .bd-h { margin-top: 22px; font-size: 1.15rem; }
 .bd-finish h2 { margin-top: 0; }
 @media (max-width: 640px) { .bd-signs { grid-template-columns: 1fr; } }
+
+/* ---------- опыты PhET ---------- */
+.lab-frame { position: relative; width: 100%; aspect-ratio: 16 / 10; max-height: 78vh; background: #000; border: var(--border) solid var(--line); border-radius: var(--radius); overflow: hidden; margin: 10px 0; }
+.lab-frame iframe { position: absolute; inset: 0; width: 100%; height: 100%; border: 0; }
+.lab-task { margin: 8px 0; }
+.lab-card .muted { font-size: .88rem; }
+.lab-save { margin-top: 18px; }
+@media (max-width: 640px) { .lab-frame { aspect-ratio: 4 / 3; } }
