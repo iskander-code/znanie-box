@@ -49,18 +49,28 @@ export async function chatBrowser(model, messages) {
     body: JSON.stringify({ model, messages, stream: false, options: { temperature: 0.3 } }),
   });
   if (!r.ok) throw new Error(`Ollama ответила ${r.status}`);
-  return (await r.json()).message.content;
+  return cleanAnswer((await r.json()).message.content);
 }
 
 export function tutorMessages({ message, mode, level, grade, history, fragments }) {
   const lvl = mode === 'socratic' ? Math.min(2, level) : 0;
   const instruction = MODES[`${mode}-${lvl}`] || MODES['socratic-0'];
   const context = fragments.map((f) => `[${f.title}] ${f.text}`).join('\n');
-  let question = message.slice(0, 1000);
-  if (mode === 'socratic' && lvl < 2) question += `\n\n(Правило для Совы: НЕ отвечай на вопрос прямо. ${instruction} Начни со слов «Подумай».)`;
-  return [
+  const msgs = [
     { role: 'system', content: `${SYSTEM(grade)}\n${instruction}\n\nФРАГМЕНТЫ:\n${context}` },
     ...history.slice(-6),
-    { role: 'user', content: question },
+    { role: 'user', content: message.slice(0, 1000) },
   ];
+  // Маленькие модели лучше слушаются правила, стоящего последним.
+  if (mode === 'socratic' && lvl < 2) msgs.push({ role: 'system', content: `НЕ отвечай на вопрос прямо. ${instruction} Начни со слова «Подумай», закончи свой ответ вопросом со знаком «?».` });
+  return msgs;
+}
+
+// Убирает служебный текст, если модель повторила инструкцию в ответе.
+export function cleanAnswer(text) {
+  return text
+    .replace(/\(?\s*Правило для Совы:[^)]*\)?/gi, '')
+    .replace(/^\s*(НЕ отвечай на вопрос прямо\.|Не давай готовый ответ\.)[^\n]*\n?/gim, '')
+    .replace(/\n{3,}/g, '\n\n')
+    .trim();
 }

@@ -59,11 +59,18 @@ def tutor_messages(body: dict, fragments: list[dict]) -> list[dict]:
     context = "\n".join(f"[{f['title']}] {f['text']}" for f in fragments)
     system = SYSTEM.format(grade=body.get("grade", 8)) + "\n" + instruction + "\n\nФРАГМЕНТЫ:\n" + context
     history = [m for m in body.get("history", [])[-6:] if m.get("role") in ("user", "assistant")]
-    question = str(body.get("message", ""))[:1000]
+    msgs = [{"role": "system", "content": system}, *history, {"role": "user", "content": str(body.get("message", ""))[:1000]}]
     if mode == "socratic" and level < 2:
-        # Маленькие модели лучше слушаются правила, стоящего в конце запроса.
-        question += f"\n\n(Правило для Совы: НЕ отвечай на вопрос прямо. {instruction} Начни со слов «Подумай».)"
-    return [{"role": "system", "content": system}, *history, {"role": "user", "content": question}]
+        # Маленькие модели лучше слушаются правила, стоящего последним.
+        msgs.append({"role": "system", "content": f"НЕ отвечай на вопрос прямо. {instruction} Начни со слова «Подумай», закончи свой ответ вопросом со знаком «?»."})
+    return msgs
+
+
+def clean_answer(text: str) -> str:
+    """Убирает служебный текст, если модель повторила инструкцию в ответе."""
+    text = re.sub(r"\(?\s*Правило для Совы:[^)]*\)?", "", text, flags=re.I)
+    text = re.sub(r"(?im)^\s*(НЕ отвечай на вопрос прямо\.|Не давай готовый ответ\.)[^\n]*\n?", "", text)
+    return re.sub(r"\n{3,}", "\n\n", text).strip()
 
 
 class Handler(SimpleHTTPRequestHandler):
@@ -147,7 +154,10 @@ class Handler(SimpleHTTPRequestHandler):
             f["relevant"] = relevant
         if not relevant or not llm.model():
             return self._json({"fragments": fragments, "answer": None, "llm": bool(llm.model())})
-        answer = llm.chat(tutor_messages(body, fragments[:3]))
+        answer = clean_answer(llm.chat(tutor_messages(body, fragments[:3])))
+        if mode == "socratic" and int(body.get("level", 0)) < 2 and "?" not in answer:
+            # Модель выдала ответ вместо наводящего вопроса — отдаём проверенную подсказку-шаблон.
+            return self._json({"fragments": fragments, "answer": None, "llm": True})
         return self._json({"fragments": fragments, "answer": answer, "llm": True, "model": llm.model()})
 
     def _save_graph(self, body: dict):

@@ -178,13 +178,18 @@ async function askSova(question, level, mode = S.chat.mode) {
         const f = r.fragments || [];
         reply = { text: r.answer, sources: [...new Map(f.slice(0, 2).map((x) => [x.title, x])).values()], graph: f.find((x) => x.graph)?.graph || null, by: `нейросеть ${r.model}` };
       } else {
-        reply = { ...localAnswer({ message: question, mode, level, fragments: r.fragments || [] }), by: 'без нейросети' };
+        reply = { ...localAnswer({ message: question, mode, level, fragments: r.fragments || [] }), by: r.llm ? 'подсказка-шаблон' : 'без нейросети' };
       }
     } else if (S.browserLLM && RELEVANT(S.lib.search(question))) {
       const fragments = S.lib.search(question);
       const history = c.messages.slice(-7, -1).map((m) => ({ role: m.role, content: m.text }));
       const text = await chatBrowser(S.browserLLM, tutorMessages({ message: question, mode, level, grade: c.grade, history, fragments: fragments.slice(0, 3) }));
-      reply = { text, sources: [...new Map(fragments.slice(0, 2).map((x) => [x.title, x])).values()], graph: fragments.find((x) => x.graph)?.graph || null, by: `нейросеть ${S.browserLLM}` };
+      if (mode === 'socratic' && level < 2 && !text.includes('?')) {
+        // Модель выдала ответ вместо наводящего вопроса — показываем проверенную подсказку-шаблон.
+        reply = { ...localAnswer({ message: question, mode, level, fragments }), by: 'подсказка-шаблон' };
+      } else {
+        reply = { text, sources: [...new Map(fragments.slice(0, 2).map((x) => [x.title, x])).values()], graph: fragments.find((x) => x.graph)?.graph || null, by: `нейросеть ${S.browserLLM}` };
+      }
     } else {
       reply = { ...localAnswer({ message: question, mode, level, fragments: S.lib.search(question) }), by: 'без нейросети' };
     }
