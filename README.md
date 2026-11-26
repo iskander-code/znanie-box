@@ -64,7 +64,7 @@ tests/                node --test и unittest
 ## Тесты
 
 ```bash
-node --test tests/
+node --test tests/engine.test.mjs
 python -m unittest discover tests
 ```
 
