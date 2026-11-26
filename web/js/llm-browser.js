@@ -3,11 +3,13 @@
 // Ollama должна разрешать запросы с адреса сайта: переменная OLLAMA_ORIGINS (см. README).
 
 const OLLAMA = 'http://localhost:11434';
-const PREFERRED = ['qwen2.5:3b', 'qwen3:4b', 'gemma3:4b', 'gemma3:1b'];
+const PREFERRED = ['qwen3.5:4b', 'qwen3:4b', 'qwen2.5:3b', 'gemma3:4b', 'gemma3:1b'];
+// У «думающих» моделей отключаем размышления: иначе ответ идёт минутами.
+const THINKING = /^(qwen3|deepseek-r1|magistral)/;
 
 const SYSTEM = (grade) =>
   `Ты — Сова, доброжелательный наставник школьника ${grade} класса сельской школы. ` +
-  'Отвечай по-русски, просто и коротко: не больше 5 предложений. ' +
+  'Обращайся к ученику на «ты». Отвечай по-русски, просто и коротко: не больше 5 предложений. ' +
   'Опирайся ТОЛЬКО на фрагменты из школьной библиотеки ниже. Если ответа в них нет, честно скажи: ' +
   '«В библиотеке этого нет, спроси учителя». Не выдумывай факты, даты и числа.';
 
@@ -46,7 +48,7 @@ export async function chatBrowser(model, messages) {
   const r = await fetch(`${OLLAMA}/api/chat`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ model, messages, stream: false, options: { temperature: 0.3 } }),
+    body: JSON.stringify({ model, messages, stream: false, options: { temperature: 0.3 }, ...(THINKING.test(model) ? { think: false } : {}) }),
   });
   if (!r.ok) throw new Error(`Ollama ответила ${r.status}`);
   return cleanAnswer((await r.json()).message.content);
@@ -68,9 +70,11 @@ export function tutorMessages({ message, mode, level, grade, history, fragments 
 
 // Убирает служебный текст, если модель повторила инструкцию в ответе.
 export function cleanAnswer(text) {
-  return text
+  const clean = text
     .replace(/\(?\s*Правило для Совы:[^)]*\)?/gi, '')
     .replace(/^\s*(НЕ отвечай на вопрос прямо\.|Не давай готовый ответ\.)[^\n]*\n?/gim, '')
     .replace(/\n{3,}/g, '\n\n')
     .trim();
+  // Отказ в конце содержательного ответа сбивает ученика — убираем его.
+  return clean.length > 150 ? clean.replace(/\s*В библиотеке этого нет,? спроси учителя\.?\s*$/i, '') : clean;
 }

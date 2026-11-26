@@ -4,7 +4,7 @@
   ZNANIE_LLM_URL   адрес Ollama (по умолчанию http://127.0.0.1:11434,
                    а если задан OLLAMA_API_KEY — https://ollama.com)
   OLLAMA_API_KEY   ключ Ollama Cloud (только для демо с интернетом)
-  ZNANIE_MODEL     имя модели; если его нет среди доступных — берётся первая
+  ZNANIE_MODEL     имя модели; если не задано — лучшая из установленных (см. PREFERRED)
 """
 from __future__ import annotations
 
@@ -15,7 +15,11 @@ import urllib.request
 
 API_KEY = os.environ.get("OLLAMA_API_KEY", "").strip()
 BASE_URL = os.environ.get("ZNANIE_LLM_URL", "https://ollama.com" if API_KEY else "http://127.0.0.1:11434").rstrip("/")
-WANTED_MODEL = os.environ.get("ZNANIE_MODEL", "qwen2.5:3b")
+WANTED_MODEL = os.environ.get("ZNANIE_MODEL", "")
+# Если модель не задана — берём лучшую из установленных.
+PREFERRED = ["qwen3.5:4b", "qwen3:4b", "qwen2.5:3b", "gemma3:4b", "gemma3:1b"]
+# У «думающих» моделей отключаем размышления: иначе ответ идёт минутами.
+THINKING = ("qwen3", "deepseek-r1", "magistral")
 
 _model_cache: dict[str, str | None] = {}
 
@@ -38,7 +42,7 @@ def model() -> str | None:
         names = [m["name"] for m in _request("/api/tags", timeout=3).get("models", [])]
     except (urllib.error.URLError, OSError, ValueError):
         return None  # не кэшируем: Ollama могут запустить позже
-    chosen = WANTED_MODEL if WANTED_MODEL in names else (names[0] if names else None)
+    chosen = next((m for m in [WANTED_MODEL, *PREFERRED] if m and m in names), names[0] if names else None)
     if chosen:
         _model_cache["name"] = chosen
     return chosen
@@ -56,4 +60,6 @@ def chat(messages: list[dict], fmt: dict | None = None, temperature: float = 0.3
     payload = {"model": m, "messages": messages, "stream": False, "options": {"temperature": temperature}}
     if fmt is not None:
         payload["format"] = fmt
+    if m.startswith(THINKING):
+        payload["think"] = False
     return _request("/api/chat", payload)["message"]["content"]
