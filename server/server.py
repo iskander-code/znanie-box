@@ -5,7 +5,7 @@
 
 Запуск:
     python server/server.py            # http://localhost:8000, только этот компьютер
-    python server/server.py --box      # для всего класса по Wi-Fi (0.0.0.0)
+    python server/server.py --box      # доступ с других устройств школы (0.0.0.0)
 """
 from __future__ import annotations
 
@@ -193,7 +193,7 @@ class Handler(SimpleHTTPRequestHandler):
 
 def main():
     ap = argparse.ArgumentParser(description="Знание в коробке — школьный сервер без интернета")
-    ap.add_argument("--box", action="store_true", help="открыть доступ для всех устройств в Wi-Fi сети")
+    ap.add_argument("--box", action="store_true", help="открыть доступ для других устройств локальной сети")
     ap.add_argument("--port", type=int, default=8000)
     args = ap.parse_args()
     host = "0.0.0.0" if args.box else "127.0.0.1"

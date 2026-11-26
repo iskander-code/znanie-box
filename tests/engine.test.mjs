@@ -96,3 +96,14 @@ test('вопросы вне библиотеки уходят нейросети
   for (const q of ['Почему небо голубое?', 'Сколько будет 2+2?', 'Как готовить бешбармак?']) assert.equal(RELEVANT(lib.search(q)), false, q);
   for (const q of ['Почему высохло Аральское море?', 'Кто такие саки?', 'Как найти дискриминант?', 'Как работает трансформатор?']) assert.equal(RELEVANT(lib.search(q)), true, q);
 });
+
+test('офлайн-режим: в кэш service worker входят все файлы сайта', async () => {
+  const { readdirSync, statSync } = await import('node:fs');
+  const { join, relative, sep } = await import('node:path');
+  const { fileURLToPath } = await import('node:url');
+  const web = fileURLToPath(new URL('../web/', import.meta.url));
+  const walk = (d) => readdirSync(d).flatMap((f) => (statSync(join(d, f)).isDirectory() ? walk(join(d, f)) : [join(d, f)]));
+  const files = walk(web).map((f) => relative(web, f).split(sep).join('/')).filter((f) => !['sw.js', '.nojekyll'].includes(f));
+  const sw = readFileSync(new URL('../web/sw.js', import.meta.url), 'utf8');
+  for (const f of files) assert.ok(sw.includes(`'${f}'`), `файл ${f} не попадает в офлайн-кэш — добавь его в FILES в web/sw.js`);
+});

@@ -86,7 +86,7 @@ function viewHome() {
   app.innerHTML = `
   <section class="hero">
     <h1>Библиотека, наставник и тренажёр мышления для школ Казахстана — без интернета</h1>
-    <p>Подключись к Wi-Fi «Мектеп-Білім» и учись с любого телефона. Наставник Сова помогает дойти до ответа самому и показывает, откуда взята информация. Если в библиотеке ответа нет, Сова спросит нейросеть.</p>
+    <p>Открой один раз — и всё работает без интернета: 400 тем, схемы и наставник сохраняются прямо на устройстве. Сова помогает дойти до ответа самому и показывает, откуда взята информация. Если в библиотеке ответа нет, Сова спросит нейросеть.</p>
   </section>
   <div class="cards subjects">${S.subjects.map((s) => `<a class="card" href="#/library/${s.id}"><span class="icon">${s.icon}</span><strong>${esc(s.name)}</strong><span class="muted">${S.texts.filter((t) => t.subjectId === s.id).length} тем</span></a>`).join('')}</div>
   <div class="cards big">
@@ -109,7 +109,7 @@ function viewAI() {
   <p class="muted">Нейросеть работает на вашем компьютере через бесплатную программу Ollama — без интернета и без отправки вопросов наружу. Установите Ollama с ollama.com и скачайте модель командой <code>ollama pull qwen2.5:3b</code>.</p>
   <div class="step"><h3><span class="n">1</span> Способ «коробка» — надёжный</h3>
     <p>Скачайте проект с GitHub (зелёная кнопка Code → Download ZIP), распакуйте и дважды нажмите <strong>Запустить.bat</strong>. Откроется браузер с прототипом, нейросеть подключится сама. Нужен Python 3.10+.</p>
-    <p class="muted small">Чтобы раздать прототип всему классу по Wi-Fi, запустите <code>python server/server.py --box</code> и откройте на телефонах адрес компьютера с портом 8000.</p></div>
+    <p class="muted small">Чтобы открыть прототип с других устройств школы, запустите <code>python server/server.py --box</code> и откройте адрес этого компьютера с портом 8000.</p></div>
   <div class="step"><h3><span class="n">2</span> Способ «этот сайт»</h3>
     <p>Разрешите Ollama отвечать этому сайту: выполните в PowerShell команду ниже, затем закройте Ollama (значок у часов → Quit) и откройте снова. Обновите эту страницу; если браузер спросит про доступ к устройствам в локальной сети — разрешите.</p>
     <pre class="code">setx OLLAMA_ORIGINS "${esc(location.origin)}"</pre></div>`;
@@ -673,5 +673,19 @@ app.addEventListener('submit', (ev) => {
   if (form.dataset.form === 'chat') { const v = form.q.value; form.q.value = ''; sendChat(v); }
   if (form.dataset.form === 'extract') extractGraph(form.text.value);
 });
+
+// ---------- офлайн-режим ----------
+function renderOffline() {
+  const el = document.getElementById('offline');
+  if (!el) return;
+  if (!navigator.onLine) { el.textContent = '● Нет интернета — работаем офлайн'; el.className = 'status on'; el.hidden = false; return; }
+  if (S.offlineReady) { el.textContent = '✓ Работает без интернета'; el.title = 'Все темы, схемы и программа сохранены на этом устройстве'; el.className = 'status on'; el.hidden = false; return; }
+  el.hidden = true;
+}
+if ('serviceWorker' in navigator && location.protocol !== 'file:') {
+  navigator.serviceWorker.register('sw.js').then(() => navigator.serviceWorker.ready).then(() => { S.offlineReady = true; renderOffline(); }).catch(() => { /* офлайн-режим недоступен */ });
+}
+window.addEventListener('online', renderOffline);
+window.addEventListener('offline', renderOffline);
 
 boot().catch((e) => { app.innerHTML = `<div class="info bad">Не удалось загрузить приложение: ${esc(e.message)}. Откройте его через сервер (<code>python server/server.py</code>), а не как файл.</div>`; });

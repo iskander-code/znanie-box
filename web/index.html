@@ -7,6 +7,8 @@
   <meta name="description" content="Офлайн-библиотека с ИИ-наставником и визуализатором причинно-следственных связей для школ без интернета">
   <meta name="theme-color" content="#1f6f5c">
   <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%231f6f5c'/%3E%3Cpath d='M8 10h16v14H8z' fill='none' stroke='white' stroke-width='2.5'/%3E%3Cpath d='M8 10l8 5 8-5' fill='none' stroke='white' stroke-width='2.5'/%3E%3C/svg%3E">
+  <link rel="manifest" href="manifest.webmanifest">
+  <link rel="apple-touch-icon" href="icon.svg">
   <link rel="stylesheet" href="styles.css">
 </head>
 <body>
@@ -19,10 +21,11 @@
       <a href="#/library" data-view="library">Библиотека</a>
       <a href="#/teacher" data-view="teacher">Учителю</a>
     </nav>
+    <span id="offline" class="status" hidden></span>
     <span id="status" class="status">…</span>
   </header>
   <main id="app" tabindex="-1"><p class="muted">Загрузка…</p></main>
-  <footer class="foot">Прототип для конкурса ИИ-решений · работает без интернета · данные учеников не покидают школу</footer>
+  <footer class="foot">Прототип для конкурса ИИ-решений · работает без интернета · данные учеников не покидают устройство</footer>
   <script type="module" src="js/app.js"></script>
 </body>
 </html>
