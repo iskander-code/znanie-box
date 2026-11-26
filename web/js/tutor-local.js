@@ -53,7 +53,7 @@ export class Library {
   }
 }
 
-const RELEVANT = (f) => f.length > 0 && (f[0].relevant ?? (f[0].score >= 1.5 && f[0].matched >= 0.34));
+export const RELEVANT = (f) => f.length > 0 && (f[0].relevant ?? (f[0].score >= 1.5 && f[0].matched >= 0.34));
 
 function questionKind(msg) {
   const m = msg.toLowerCase();

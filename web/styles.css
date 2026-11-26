@@ -171,3 +171,5 @@ blockquote { margin: 8px 0; padding: 6px 12px; border-left: 3px solid var(--acce
   .msg { max-width: 96%; }
 }
 @media (prefers-reduced-motion: reduce) { * { transition: none !important; } }
+.status a { color: inherit; }
+pre.code { background: var(--accent-soft); padding: 10px 12px; border-radius: 8px; overflow-x: auto; white-space: pre-wrap; word-break: break-all; }

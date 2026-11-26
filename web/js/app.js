@@ -1,10 +1,12 @@
 import { simulate, pathTo, findLoops, checkPredictions, compareGraphs, trend, DEFAULT_DELAY_LABELS } from './engine.js';
 import { renderGraph, esc } from './graph-view.js';
-import { Library, localAnswer, makeQuiz, checkQuiz } from './tutor-local.js';
+import { Library, localAnswer, makeQuiz, checkQuiz, RELEVANT } from './tutor-local.js';
+import { detectBrowserLLM, chatBrowser, tutorMessages, DEBRIEF } from './llm-browser.js';
 
 const app = document.getElementById('app');
 const S = {
   server: null, // ответ /api/health, если сайт открыт с коробки
+  browserLLM: null, // модель Ollama на этом компьютере, если сайт открыт не с коробки
   texts: [],
   graphs: [],
   lib: null,
@@ -44,13 +46,18 @@ async function boot() {
   }
   S.chat.grade = store.get('grade', 8);
   renderStatus();
+  if (!S.server) {
+    // Сайт открыт не с коробки: пробуем Ollama на этом компьютере, не задерживая загрузку.
+    detectBrowserLLM().then((m) => { if (m) { S.browserLLM = m; renderStatus(); route(); } });
+  }
   window.addEventListener('hashchange', route);
   route();
 }
 
 function renderStatus() {
   const el = document.getElementById('status');
-  if (!S.server) { el.textContent = 'Демо-сайт · без нейросети'; el.className = 'status demo'; return; }
+  if (!S.server && S.browserLLM) { el.textContent = `Нейросеть ${S.browserLLM} на этом компьютере`; el.className = 'status on'; return; }
+  if (!S.server) { el.innerHTML = 'Без нейросети · <a href="#/ai">как включить</a>'; el.className = 'status demo'; return; }
   el.textContent = S.server.llm ? `Коробка · нейросеть ${S.server.model}` : 'Коробка · нейросеть не запущена';
   el.className = `status ${S.server.llm ? 'on' : 'demo'}`;
 }
@@ -58,7 +65,7 @@ function renderStatus() {
 function route() {
   const [view = '', id] = location.hash.replace(/^#\/?/, '').split('/');
   document.querySelectorAll('.nav a').forEach((a) => a.classList.toggle('active', a.dataset.view === (view || 'home')));
-  const views = { '': viewHome, sova: viewSova, explore: viewExplore, build: viewBuild, teacher: viewTeacher, library: viewLibrary };
+  const views = { '': viewHome, sova: viewSova, explore: viewExplore, build: viewBuild, teacher: viewTeacher, library: viewLibrary, ai: viewAI };
   (views[view] || viewHome)(id ? decodeURIComponent(id) : undefined);
   window.scrollTo(0, 0);
 }
@@ -88,6 +95,21 @@ function viewHome() {
   <h2>Схемы «Что будет, если…»</h2>
   ${graphCards('explore')}
   <p class="note">Сова может ошибаться — проверяй её по источнику. Твои вопросы не уходят в интернет: всё работает внутри школьной коробки.</p>`;
+}
+
+// ---------- как включить нейросеть ----------
+function viewAI() {
+  const on = S.server?.llm || S.browserLLM;
+  app.innerHTML = `
+  <h1>Как включить нейросеть</h1>
+  ${on ? `<div class="info">✓ Нейросеть уже работает: ${esc(S.server?.model || S.browserLLM)}. <a href="#/sova">Спросить Сову</a></div>` : ''}
+  <p class="muted">Нейросеть работает на вашем компьютере через бесплатную программу Ollama — без интернета и без отправки вопросов наружу. Установите Ollama с ollama.com и скачайте модель командой <code>ollama pull qwen2.5:3b</code>.</p>
+  <div class="step"><h3><span class="n">1</span> Способ «коробка» — надёжный</h3>
+    <p>Скачайте проект с GitHub (зелёная кнопка Code → Download ZIP), распакуйте и дважды нажмите <strong>Запустить.bat</strong>. Откроется браузер с прототипом, нейросеть подключится сама. Нужен Python 3.10+.</p>
+    <p class="muted small">Чтобы раздать прототип всему классу по Wi-Fi, запустите <code>python server/server.py --box</code> и откройте на телефонах адрес компьютера с портом 8000.</p></div>
+  <div class="step"><h3><span class="n">2</span> Способ «этот сайт»</h3>
+    <p>Разрешите Ollama отвечать этому сайту: выполните в PowerShell команду ниже, затем закройте Ollama (значок у часов → Quit) и откройте снова. Обновите эту страницу; если браузер спросит про доступ к устройствам в локальной сети — разрешите.</p>
+    <pre class="code">setx OLLAMA_ORIGINS "${esc(location.origin)}"</pre></div>`;
 }
 
 // ---------- библиотека ----------
@@ -158,6 +180,11 @@ async function askSova(question, level, mode = S.chat.mode) {
       } else {
         reply = { ...localAnswer({ message: question, mode, level, fragments: r.fragments || [] }), by: 'без нейросети' };
       }
+    } else if (S.browserLLM && RELEVANT(S.lib.search(question))) {
+      const fragments = S.lib.search(question);
+      const history = c.messages.slice(-7, -1).map((m) => ({ role: m.role, content: m.text }));
+      const text = await chatBrowser(S.browserLLM, tutorMessages({ message: question, mode, level, grade: c.grade, history, fragments: fragments.slice(0, 3) }));
+      reply = { text, sources: [...new Map(fragments.slice(0, 2).map((x) => [x.title, x])).values()], graph: fragments.find((x) => x.graph)?.graph || null, by: `нейросеть ${S.browserLLM}` };
     } else {
       reply = { ...localAnswer({ message: question, mode, level, fragments: S.lib.search(question) }), by: 'без нейросети' };
     }
@@ -293,7 +320,7 @@ function drawPanel() {
     if (loops.length) h += `<div class="step"><h3>Петли обратной связи</h3><ul class="list">${loops.map((l) => `<li><strong>${l.type === 'reinforcing' ? 'Усиливающая' : 'Стабилизирующая'}:</strong> ${l.nodes.map((n) => esc(nodeLabel(g, n))).join(' → ')} → ${esc(nodeLabel(g, l.nodes[0]))}</li>`).join('')}</ul></div>`;
     h += `<div class="step"><h3>🦉 Разбор с Совой</h3><p>${esc(localDebrief(g, r, checks)).replace(/\n/g, '<br>')}</p>
       ${x.debrief ? `<div class="msg assistant">${esc(x.debrief).replace(/\n/g, '<br>')}<span class="by">нейросеть</span></div>` : ''}
-      ${S.server?.llm && !x.debrief ? `<button class="btn" data-action="debrief" ${x.busy ? 'disabled' : ''}>${x.busy ? 'Сова думает…' : 'Обсудить с Совой подробнее'}</button>` : ''}
+      ${(S.server?.llm || S.browserLLM) && !x.debrief ? `<button class="btn" data-action="debrief" ${x.busy ? 'disabled' : ''}>${x.busy ? 'Сова думает…' : 'Обсудить с Совой подробнее'}</button>` : ''}
       ${g.questions?.length ? `<p class="question"><strong>Подумай:</strong> ${esc(g.questions[0])}</p>` : ''}</div>
       <button class="btn wide" data-action="reset">↺ Попробовать другое условие</button>`;
   }
@@ -392,8 +419,12 @@ async function debriefWithSova() {
     loops: findLoops(g).map((l) => `${l.type === 'reinforcing' ? 'усиливающая' : 'стабилизирующая'}: ${l.nodes.map((n) => nodeLabel(g, n)).join(' → ')}`),
   };
   try {
-    const res = await postJSON('api/chat', { mode: 'debrief', context });
-    x.debrief = res.answer || 'Нейросеть сейчас недоступна.';
+    if (S.server) {
+      const res = await postJSON('api/chat', { mode: 'debrief', context });
+      x.debrief = res.answer || 'Нейросеть сейчас недоступна.';
+    } else {
+      x.debrief = await chatBrowser(S.browserLLM, [{ role: 'system', content: DEBRIEF }, { role: 'user', content: JSON.stringify(context) }]);
+    }
   } catch (e) {
     x.debrief = `Не получилось: ${e.message}`;
   }
