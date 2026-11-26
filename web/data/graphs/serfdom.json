@@ -1,0 +1,41 @@
+{
+  "id": "serfdom",
+  "title": "Отмена крепостного права",
+  "subject": "История",
+  "grade": 8,
+  "text": "serfdom",
+  "source": "Учебный параграф «Отмена крепостного права»",
+  "verified_by_teacher": true,
+  "delayLabels": ["сразу", "через годы", "через десятилетия"],
+  "nodes": [
+    {"id": "freedom", "label": "Личная свобода крестьян", "adjustable": true},
+    {"id": "payments", "label": "Выкупные платежи", "adjustable": true},
+    {"id": "land", "label": "Размер крестьянских наделов", "adjustable": true},
+    {"id": "labor", "label": "Рабочие руки для фабрик"},
+    {"id": "industry", "label": "Развитие промышленности"},
+    {"id": "demand", "label": "Спрос на товары деревни"},
+    {"id": "farms", "label": "Благосостояние крестьянских хозяйств"},
+    {"id": "discontent", "label": "Крестьянское недовольство"},
+    {"id": "reforms", "label": "Потребность в новых реформах"}
+  ],
+  "edges": [
+    {"from": "freedom", "to": "labor", "sign": 1, "strength": 2, "delay": 1, "evidence": "Возможность уходить в города дала фабрикам и заводам рабочие руки"},
+    {"from": "labor", "to": "industry", "sign": 1, "strength": 3, "delay": 2, "evidence": "что ускорило развитие промышленности"},
+    {"from": "industry", "to": "demand", "sign": 1, "strength": 2, "delay": 1, "evidence": "увеличивал спрос на хлеб и другие товары деревни"},
+    {"from": "demand", "to": "farms", "sign": 1, "strength": 1, "delay": 1, "evidence": "Это давало крестьянам дополнительный заработок"},
+    {"from": "payments", "to": "farms", "sign": -1, "strength": 3, "delay": 2, "evidence": "растянулись на десятилетия и тяжело ложились на крестьянские хозяйства"},
+    {"from": "land", "to": "farms", "sign": 1, "strength": 2, "delay": 1, "evidence": "Маленький надел с трудом мог прокормить семью"},
+    {"from": "land", "to": "discontent", "sign": -1, "strength": 2, "delay": 1, "evidence": "Нехватка земли и выкупные платежи усиливали крестьянское недовольство"},
+    {"from": "payments", "to": "discontent", "sign": 1, "strength": 3, "delay": 1, "evidence": "Нехватка земли и выкупные платежи усиливали крестьянское недовольство"},
+    {"from": "freedom", "to": "reforms", "sign": 1, "strength": 2, "delay": 1, "evidence": "Реформа потребовала новых преобразований"}
+  ],
+  "scenarios": [
+    {"label": "Крестьяне получили личную свободу", "changes": {"freedom": 0.8}},
+    {"label": "Выкупные платежи отменили сразу", "changes": {"payments": -0.9}},
+    {"label": "Наделы урезали ещё сильнее", "changes": {"land": -0.7}}
+  ],
+  "questions": [
+    "Как ты думаешь, почему государство не отдало крестьянам землю бесплатно? Найди подсказку в статье «Реформы Александра II».",
+    "Какие последствия реформы проявились сразу, а какие только через десятилетия? Почему так?"
+  ]
+}

@@ -1,0 +1,6 @@
+__pycache__/
+*.pyc
+data/user_graphs/
+.env
+.claude/
+node_modules/

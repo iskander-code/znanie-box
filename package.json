@@ -1,0 +1,9 @@
+{
+  "name": "znanie-box",
+  "private": true,
+  "type": "module",
+  "description": "Офлайн-библиотека с ИИ-наставником и визуализатором причинно-следственных связей",
+  "scripts": {
+    "test": "node --test tests/"
+  }
+}

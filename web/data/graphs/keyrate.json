@@ -1,0 +1,47 @@
+{
+  "id": "keyrate",
+  "title": "Ключевая ставка и инфляция",
+  "subject": "Обществознание (экономика)",
+  "grade": 10,
+  "text": "keyrate",
+  "source": "Учебный параграф «Ключевая ставка и инфляция»",
+  "verified_by_teacher": true,
+  "delayLabels": ["сразу", "через месяцы", "через год и больше"],
+  "nodes": [
+    {"id": "rate", "label": "Ключевая ставка", "adjustable": true},
+    {"id": "loanrate", "label": "Проценты по кредитам"},
+    {"id": "deprate", "label": "Проценты по вкладам"},
+    {"id": "credit", "label": "Объём кредитов"},
+    {"id": "savings", "label": "Сбережения населения"},
+    {"id": "demand", "label": "Спрос на товары"},
+    {"id": "inflation", "label": "Инфляция"},
+    {"id": "invest", "label": "Инвестиции компаний"},
+    {"id": "jobs", "label": "Найм работников"},
+    {"id": "growth", "label": "Рост экономики"},
+    {"id": "ruble", "label": "Курс рубля"},
+    {"id": "imports", "label": "Цены на импорт"}
+  ],
+  "edges": [
+    {"from": "rate", "to": "loanrate", "sign": 1, "strength": 3, "delay": 0, "evidence": "коммерческие банки поднимают проценты по кредитам и вкладам"},
+    {"from": "rate", "to": "deprate", "sign": 1, "strength": 3, "delay": 0, "evidence": "коммерческие банки поднимают проценты по кредитам и вкладам"},
+    {"from": "loanrate", "to": "credit", "sign": -1, "strength": 3, "delay": 0, "evidence": "Дорогие кредиты берут реже"},
+    {"from": "loanrate", "to": "invest", "sign": -1, "strength": 2, "delay": 1, "evidence": "компании — строительство новых цехов"},
+    {"from": "deprate", "to": "savings", "sign": 1, "strength": 2, "delay": 0, "evidence": "побуждают людей больше сберегать и меньше тратить"},
+    {"from": "credit", "to": "demand", "sign": 1, "strength": 2, "delay": 1, "evidence": "семьи откладывают крупные покупки"},
+    {"from": "savings", "to": "demand", "sign": -1, "strength": 2, "delay": 1, "evidence": "больше сберегать и меньше тратить"},
+    {"from": "demand", "to": "inflation", "sign": 1, "strength": 3, "delay": 2, "evidence": "Когда спрос на товары снижается, продавцам труднее повышать цены"},
+    {"from": "invest", "to": "jobs", "sign": 1, "strength": 2, "delay": 1, "evidence": "медленнее нанимают работников"},
+    {"from": "jobs", "to": "growth", "sign": 1, "strength": 2, "delay": 2, "evidence": "рост экономики может замедлиться"},
+    {"from": "rate", "to": "ruble", "sign": 1, "strength": 2, "delay": 0, "evidence": "поддерживает курс рубля"},
+    {"from": "ruble", "to": "imports", "sign": -1, "strength": 2, "delay": 1, "evidence": "удешевляет импортные товары"},
+    {"from": "imports", "to": "inflation", "sign": 1, "strength": 1, "delay": 1, "evidence": "дешёвый импорт тоже сдерживает рост цен"}
+  ],
+  "scenarios": [
+    {"label": "Центробанк повысил ставку", "changes": {"rate": 0.7}},
+    {"label": "Центробанк резко снизил ставку", "changes": {"rate": -0.8}}
+  ],
+  "questions": [
+    "Почему Центробанк не поднимает ставку до очень высокого уровня, если это замедляет инфляцию? Посмотри на правую часть схемы.",
+    "Кому выгодно повышение ставки, а кому нет: вкладчику, заёмщику, владельцу завода?"
+  ]
+}
