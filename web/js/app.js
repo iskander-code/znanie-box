@@ -2,6 +2,9 @@ import { simulate, pathTo, findLoops, checkPredictions, compareGraphs, trend, DE
 import { renderGraph, esc } from './graph-view.js';
 import { Library, localAnswer, makeQuiz, checkQuiz, RELEVANT } from './tutor-local.js';
 import { detectBrowserLLM, chatBrowser, tutorMessages, generalMessages, DEBRIEF } from './llm-browser.js';
+import { themeSwitcher, applyTheme, setTheme, currentTheme, reduceMotion, speak } from './a11y.js';
+import { login, getToken, setToken, recordLocal, localSummary, resetLocalStats, localExam, setLocalExam } from './teacher.js';
+import { qrSVG } from './qr.js';
 
 const app = document.getElementById('app');
 const S = {
@@ -13,16 +16,26 @@ const S = {
   chat: { messages: [], mode: 'socratic', level: 0, lastQuestion: '', quiz: null, grade: 8, busy: false },
   ex: null,
   bd: null,
-  teacher: { text: '', graph: null, notes: [], busy: false, error: '' },
+  teacher: { text: '', graph: null, notes: [], busy: false, error: '', pinError: '', summary: null },
+  exam: false, // режим контрольной: Сова не выдаёт готовых ответов
+  auth: getToken(), // токен учителя (до закрытия вкладки)
 };
+const EXAM_GENERAL = 'Сейчас идёт контрольная: Сова помогает только подсказками по темам школьной библиотеки. Попробуй спросить про тему из учебника.';
 
 const TREND_WORD = { up: 'вырастет', down: 'уменьшится', same: 'не изменится' };
 const TREND_PAST = { up: 'вырос', down: 'уменьшился', same: 'не изменился' };
 const ARROW = { up: '▲', down: '▼', same: '=' };
 
 const getJSON = (url) => fetch(url).then((r) => { if (!r.ok) throw new Error(url); return r.json(); });
-const postJSON = (url, body) => fetch(url, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) })
-  .then(async (r) => { const data = await r.json().catch(() => ({})); if (!r.ok) throw new Error(data.error || `Ошибка ${r.status}`); return data; });
+const postJSON = (url, body, headers = {}) => fetch(url, { method: 'POST', headers: { 'Content-Type': 'application/json', ...headers }, body: JSON.stringify(body) })
+  .then(async (r) => {
+    const data = await r.json().catch(() => ({}));
+    if (r.status === 403 && headers['X-Teacher-Token']) { logoutTeacher(); throw new Error('Вход учителя истёк — введите PIN ещё раз'); }
+    if (!r.ok) throw new Error(data.error || `Ошибка ${r.status}`);
+    return data;
+  });
+const teacherPost = (url, body) => postJSON(url, body, { 'X-Teacher-Token': S.auth || '' });
+const isTeacher = () => !!S.auth;
 const graphById = (id) => S.graphs.find((g) => g.id === id);
 const nodeLabel = (g, id) => g.nodes.find((n) => n.id === id)?.label || id;
 const textOf = (g) => g.sourceText || S.texts.find((t) => t.id === g.text)?.text || '';
@@ -47,6 +60,8 @@ async function boot() {
     try { S.graphs.push(...(await getJSON('api/graphs'))); } catch { /* нет своих схем */ }
   }
   S.chat.grade = store.get('grade', 8);
+  S.exam = S.server ? !!S.server.exam : localExam();
+  if (S.server) setInterval(syncSettings, 15000); // режим контрольной включается на всех устройствах класса
   renderStatus();
   if (!S.server) {
     // Сайт открыт не с коробки: пробуем Ollama на этом компьютере, не задерживая загрузку.
@@ -54,6 +69,19 @@ async function boot() {
   }
   window.addEventListener('hashchange', route);
   route();
+}
+
+async function syncSettings() {
+  try {
+    const r = await getJSON('api/settings');
+    if (r.exam !== S.exam) { S.exam = r.exam; renderStatus(); if (/^#\/(sova|teacher)/.test(location.hash) && !S.chat.busy) route(); }
+  } catch { /* коробка недоступна — оставляем как было */ }
+}
+
+function logoutTeacher() {
+  if (S.server && S.auth) postJSON('api/teacher/logout', {}, { 'X-Teacher-Token': S.auth }).catch(() => {});
+  S.auth = null;
+  setToken(null);
 }
 
 function renderStatus() {
@@ -67,7 +95,7 @@ function renderStatus() {
 function route() {
   const [view = '', id] = location.hash.replace(/^#\/?/, '').split('/');
   document.querySelectorAll('.nav a').forEach((a) => a.classList.toggle('active', a.dataset.view === (view || 'home')));
-  const views = { '': viewHome, sova: viewSova, explore: viewExplore, build: viewBuild, teacher: viewTeacher, library: viewLibrary, ai: viewAI };
+  const views = { '': viewHome, sova: viewSova, explore: viewExplore, build: viewBuild, teacher: viewTeacher, library: viewLibrary, ai: viewAI, connect: viewConnect };
   (views[view] || viewHome)(id ? decodeURIComponent(id) : undefined);
   window.scrollTo(0, 0);
 }
@@ -94,6 +122,7 @@ function viewHome() {
     <a class="card" href="#/explore"><span class="icon">🔀</span><strong>Что будет, если…</strong><span class="muted">Измени одно условие в параграфе и проследи цепочку последствий</span></a>
     <a class="card" href="#/build"><span class="icon">🧩</span><strong>Собери сам</strong><span class="muted">Построй схему причин и следствий сам и сравни с эталоном</span></a>
     <a class="card" href="#/library"><span class="icon">📚</span><strong>Библиотека</strong><span class="muted">${S.texts.length} тем по истории Казахстана, физике, алгебре и геометрии</span></a>
+    <a class="card" href="#/connect"><span class="icon">📱</span><strong>Как подключить Коробку</strong><span class="muted">4 простых шага и QR-код для телефонов класса</span></a>
   </div>
   <h2>Схемы «Что будет, если…»</h2>
   ${graphCards('explore')}
@@ -122,8 +151,8 @@ function viewLibrary(id) {
     const list = S.texts.filter((t) => t.subjectId === doc.subjectId);
     const i = list.indexOf(doc);
     app.innerHTML = `<a class="back" href="#/library/${doc.subjectId}">← ${esc(doc.subject)}</a>
-      <article class="doc"><span class="tag">${esc(doc.subject)} · ${doc.grade} класс · ${esc(doc.section)}</span><h1>${esc(doc.title)}</h1><p>${esc(doc.text)}</p></article>
-      <div class="row">${doc.graph ? `<a class="btn primary" href="#/explore/${doc.graph}">🔀 Схема «Что будет, если…»</a>` : ''}
+      <article class="doc" id="doc"><span class="tag">${esc(doc.subject)} · ${doc.grade} класс · ${esc(doc.section)}</span><h1>${esc(doc.title)}</h1><p>${esc(doc.text)}</p></article>
+      <div class="row"><button class="btn" data-action="speak-doc" aria-pressed="false">🔊 Озвучить текст</button>${doc.graph ? `<a class="btn primary" href="#/explore/${doc.graph}">🔀 Схема «Что будет, если…»</a>` : ''}
       <button class="btn" data-action="ask-about" data-title="${esc(doc.title)}">🦉 Спросить Сову об этом</button></div>
       <div class="row pager">${i > 0 ? `<a class="btn ghost" href="#/library/${list[i - 1].id}">← ${esc(list[i - 1].title)}</a>` : ''}${i < list.length - 1 ? `<a class="btn ghost" href="#/library/${list[i + 1].id}">${esc(list[i + 1].title)} →</a>` : ''}</div>`;
     return;
@@ -168,7 +197,8 @@ function renderLibList(subjectId) {
 // ---------- Сова ----------
 function viewSova() {
   const c = S.chat;
-  const modes = [['socratic', 'Наведи на мысль'], ['explain', 'Объясни'], ['quiz', 'Проверь меня']];
+  const modes = [['socratic', 'Наведи на мысль'], ['explain', 'Объясни'], ['quiz', 'Проверь меня']].filter(([m]) => !(S.exam && m === 'explain'));
+  if (S.exam && c.mode === 'explain') c.mode = 'socratic';
   const last = [...c.messages].reverse().find((m) => m.role === 'assistant');
   app.innerHTML = `
   <div class="chat">
@@ -177,15 +207,18 @@ function viewSova() {
       <div class="seg" role="tablist">${modes.map(([m, l]) => `<button class="${c.mode === m ? 'on' : ''}" data-action="chat-mode" data-mode="${m}">${l}</button>`).join('')}</div>
       <label class="muted">Класс <select data-action-change="grade">${[5, 6, 7, 8, 9, 10, 11].map((g) => `<option ${g === c.grade ? 'selected' : ''}>${g}</option>`).join('')}</select></label>
     </div>
-    <div class="messages" id="messages">
+    ${S.exam ? '<div class="info exam" role="status">📝 Идёт контрольная работа: Сова даёт только подсказки, готовых ответов нет.</div>' : ''}
+    <p id="tts-note" class="muted small" hidden></p>
+    <div class="messages" id="messages" aria-live="polite">
       ${c.messages.length ? '' : `<div class="msg assistant"><p>Привет! Я Сова. Спроси меня о том, что непонятно в параграфе. Например:</p>
         <div class="row">${['Почему высохло Аральское море?', 'Кто основал Казахское ханство?', 'Что такое закон Ома?', 'Как найти дискриминант?', 'Чему равна сумма углов треугольника?'].map((q) => `<button class="chip" data-action="ask-example" data-q="${esc(q)}">${esc(q)}</button>`).join('')}</div></div>`}
       ${c.messages.map(renderMsg).join('')}
       ${c.busy ? '<div class="msg assistant typing">Сова думает…</div>' : ''}
     </div>
     ${last && !c.busy && last.kind === 'answer' ? `<div class="row actions">
-      ${last.level < 2 && !last.general ? '<button class="btn" data-action="hint-more">Ещё подсказка</button><button class="btn" data-action="show-answer">Покажи ответ</button>' : ''}
-      <button class="btn" data-action="simpler">Объясни проще</button>
+      ${last.level < 2 && !last.general && !(S.exam && last.level >= 1) ? '<button class="btn" data-action="hint-more">Ещё подсказка</button>' : ''}
+      ${last.level < 2 && !last.general && !S.exam ? '<button class="btn" data-action="show-answer">Покажи ответ</button>' : ''}
+      ${S.exam ? '' : '<button class="btn" data-action="simpler">Объясни проще</button>'}
       <button class="btn ghost" data-action="report">Тут ошибка</button></div>` : ''}
     <form class="composer" data-form="chat">
       <input name="q" autocomplete="off" placeholder="${c.mode === 'quiz' && c.quiz ? 'Впиши пропущенное слово' : c.mode === 'quiz' ? 'Тема для проверки, например «инфляция»' : 'Задай вопрос…'}" aria-label="Вопрос" />
@@ -197,17 +230,19 @@ function viewSova() {
   if (!c.busy) app.querySelector('.composer input').focus({ preventScroll: true });
 }
 
-function renderMsg(m) {
+function renderMsg(m, i) {
   const sources = (m.sources || []).map((s) => `<a class="chip src" href="#/library/${esc(s.docId)}">📖 ${esc(s.title)}</a>`).join('');
   const graph = m.graph ? `<a class="chip graph" href="#/explore/${esc(m.graph)}">🔀 Открыть схему «${esc(graphById(m.graph)?.title || m.graph)}»</a>` : '';
   const by = m.role === 'assistant' && m.by ? `<span class="by">${esc(m.by)}</span>` : '';
-  return `<div class="msg ${m.role}">${esc(m.text).replace(/\n/g, '<br>')}${sources || graph ? `<div class="row">${sources}${graph}</div>` : ''}${by}</div>`;
+  const say = m.role === 'assistant' ? `<button class="say" data-action="speak-msg" data-i="${i}" aria-pressed="false" aria-label="Озвучить ответ" title="Озвучить">🔊</button>` : '';
+  return `<div class="msg ${m.role}">${say}${esc(m.text).replace(/\n/g, '<br>')}${sources || graph ? `<div class="row">${sources}${graph}</div>` : ''}${by}</div>`;
 }
 
 const GENERAL_LABEL = (model) => `⚠ нейросеть ${model}: ответ не из библиотеки — проверь у учителя или в учебнике`;
 
 async function askSova(question, level, mode = S.chat.mode) {
   const c = S.chat;
+  if (S.exam) { mode = 'socratic'; level = Math.min(level, 1); } // на сервере то же правило проверяется ещё раз
   c.busy = true;
   viewSova();
   let reply;
@@ -215,7 +250,11 @@ async function askSova(question, level, mode = S.chat.mode) {
     if (S.server) {
       const history = c.messages.slice(-7, -1).map((m) => ({ role: m.role, content: m.text }));
       const r = await postJSON('api/chat', { message: question, mode, level, grade: c.grade, history });
-      if (r.answer && r.general) {
+      if ('exam' in r && r.exam !== S.exam) { S.exam = !!r.exam; renderStatus(); }
+      if (r.exam) { mode = 'socratic'; level = Math.min(level, Number(r.level ?? 1)); }
+      if (r.answer && r.model === 'контрольная') {
+        reply = { text: r.answer, sources: [], graph: null, by: 'режим контрольной', general: true };
+      } else if (r.answer && r.general) {
         reply = { text: r.answer, sources: [], graph: null, by: GENERAL_LABEL(r.model), general: true };
       } else if (r.answer) {
         const f = r.fragments || [];
@@ -223,6 +262,8 @@ async function askSova(question, level, mode = S.chat.mode) {
       } else {
         reply = { ...localAnswer({ message: question, mode, level, fragments: r.fragments || [] }), by: r.llm ? 'подсказка-шаблон' : 'без нейросети' };
       }
+    } else if (S.exam && !RELEVANT(S.lib.search(question))) {
+      reply = { text: EXAM_GENERAL, sources: [], graph: null, by: 'режим контрольной', general: true };
     } else if (S.browserLLM && RELEVANT(S.lib.search(question))) {
       const fragments = S.lib.search(question);
       const history = c.messages.slice(-7, -1).map((m) => ({ role: m.role, content: m.text }));
@@ -243,6 +284,11 @@ async function askSova(question, level, mode = S.chat.mode) {
     }
   } catch (e) {
     reply = { text: `Не получилось ответить: ${e.message}`, sources: [] };
+  }
+  if (!S.server) {
+    // Обезличенная статистика тем для учителя (с коробкой её ведёт сервер).
+    const top = S.lib.search(question);
+    if (RELEVANT(top)) recordLocal(top[0].docId, top[0].title, mode === 'explain' || mode === 'simpler' || level >= 2 ? 'answer' : level ? 'hint' : 'question');
   }
   c.messages.push({ role: 'assistant', kind: 'answer', level, ...reply });
   c.busy = false;
@@ -438,6 +484,11 @@ function runSimulation() {
   x.highlight = null;
   x.debrief = '';
   drawPanel();
+  if (reduceMotion()) { // без анимации: сразу итог
+    x.phase = 'done';
+    drawExploreGraph(); drawPanel();
+    return;
+  }
   let wave = 0;
   const step = () => {
     if (S.ex !== x || !document.getElementById('graph')) { // ученик ушёл со страницы
@@ -547,25 +598,151 @@ function viewBuild(id) {
 // ---------- кабинет учителя ----------
 function viewTeacher() {
   const t = S.teacher;
+  if (!isTeacher()) {
+    app.innerHTML = `
+    <h1>Кабинет учителя</h1>
+    <p><span class="badge">🔒 Режим ученика (только чтение)</span></p>
+    <p class="muted">Здесь учитель проверяет схемы, включает режим контрольной и смотрит, какие темы даются классу труднее. Ученикам доступны готовые схемы во вкладке «Что будет, если…».</p>
+    <form data-form="pin" class="pin-form" autocomplete="off">
+      <label for="pin">PIN-код учителя</label>
+      <div class="row"><input id="pin" name="pin" type="password" inputmode="numeric" pattern="[0-9]*" maxlength="8" required aria-describedby="pin-help">
+      <button class="btn primary">Войти</button></div>
+      <p id="pin-help" class="muted small">${S.server ? 'PIN задаётся на коробке (server/teacher.py или запуск с ключом --pin).' : 'На сайте без коробки PIN проверяется в браузере, а режим контрольной действует только на этом устройстве.'}</p>
+      ${t.pinError ? `<div class="info bad" role="alert">${esc(t.pinError)}</div>` : ''}
+    </form>`;
+    return;
+  }
   const canExtract = S.server?.llm;
+  const reports = store.get('reports', []);
+  if (!t.summary) loadSummary();
   app.innerHTML = `
-  <h1>Кабинет учителя</h1>
-  <p class="muted">Вставьте параграф — нейросеть предложит схему причин и следствий. Каждая связь подтверждается цитатой; связи без цитаты убираются автоматически. Проверьте схему и опубликуйте для класса.</p>
-  ${canExtract ? '' : `<div class="info">${S.server ? 'Нейросеть на коробке не запущена: запустите Ollama и скачайте модель (<code>ollama pull qwen2.5:3b</code>), затем перезапустите сервер.' : 'Это демо-сайт без нейросети. Построение схем работает на школьной коробке: запустите <code>python server/server.py</code> с Ollama.'} Пока можно открыть готовые схемы во вкладке «Что будет, если…».</div>`}
-  <form data-form="extract" class="stack">
-    <textarea name="text" rows="7" placeholder="Текст параграфа…" ${canExtract ? '' : 'disabled'}>${esc(t.text)}</textarea>
-    <div class="row"><button class="btn primary" ${canExtract && !t.busy ? '' : 'disabled'}>${t.busy ? 'Строю схему… это может занять минуту' : 'Построить схему'}</button>
-    <button type="button" class="btn ghost" data-action="sample-text" ${canExtract ? '' : 'disabled'}>Вставить пример</button></div>
-  </form>
-  ${t.error ? `<div class="info bad">${esc(t.error)}</div>` : ''}
-  ${t.graph ? `
-    <h2>Черновик: <input class="title-input" value="${esc(t.graph.title)}" data-action-input="t-title" aria-label="Название схемы"></h2>
-    ${t.notes.length ? `<details class="notes"><summary>Проверка цитат: ${t.notes.length} замечаний</summary><ul>${t.notes.map((n) => `<li>${esc(n)}</li>`).join('')}</ul></details>` : '<p class="muted">Все связи подтверждены цитатами.</p>'}
-    <div class="graph-wrap" id="graph"></div>
-    <h3>Связи</h3>
-    <ul class="edges-edit">${t.graph.edges.map((e, i) => `<li><button class="chip" data-action="t-sign" data-i="${i}">${e.sign > 0 ? '+' : '−'}</button> ${esc(nodeLabel(t.graph, e.from))} → ${esc(nodeLabel(t.graph, e.to))} <span class="muted small">«${esc(e.evidence)}»</span> <button class="link" data-action="t-del" data-i="${i}">удалить</button></li>`).join('')}</ul>
-    <div class="row"><button class="btn primary" data-action="t-publish">Опубликовать для класса</button><button class="btn" data-action="t-download">Скачать JSON</button></div>` : ''}`;
+  <div class="ex-head"><h1>Кабинет учителя</h1><div class="row"><span class="badge on">✓ Режим учителя</span><button class="btn ghost" data-action="t-logout">Выйти</button></div></div>
+
+  <section class="step">
+    <h3>📝 Режим контрольной работы</h3>
+    <label class="switch"><input type="checkbox" role="switch" data-action-change="exam" ${S.exam ? 'checked' : ''}><span>${S.exam ? 'Включён: Сова даёт только подсказки, кнопки «Покажи ответ», «Объясни» и «Объясни проще» скрыты' : 'Выключен'}</span></label>
+    <p class="muted small">${S.server ? 'Действует на всех устройствах, подключённых к коробке (обновляется в течение 15 секунд). Запрет проверяет сервер, поэтому обойти его из браузера нельзя.' : 'Без коробки режим действует только на этом устройстве.'}</p>
+  </section>
+
+  <section class="step">
+    <h3>📊 Сложные темы класса</h3>
+    <p class="muted small">Обезличенно: без имён и текстов вопросов — только сколько раз по теме спрашивали Сову, просили подсказку, готовый ответ или жаловались на ошибку. ${S.server ? 'Данные со всех устройств класса.' : 'Данные с этого устройства.'}</p>
+    ${t.summary === null ? '<p class="muted">Загрузка…</p>' : t.summary.length ? `<div class="table-wrap"><table class="table">
+      <thead><tr><th scope="col">Тема</th><th scope="col">Вопросов</th><th scope="col">Подсказок</th><th scope="col">Готовых ответов</th><th scope="col">«Тут ошибка»</th></tr></thead>
+      <tbody>${t.summary.map((r) => `<tr><th scope="row"><a href="#/library/${esc(r.docId)}">${esc(r.title)}</a></th><td>${r.question}</td><td>${r.hint}</td><td>${r.answer}</td><td>${r.report}</td></tr>`).join('')}</tbody></table></div>
+      <div class="row"><button class="btn" data-action="t-refresh">↻ Обновить</button><button class="btn ghost" data-action="t-reset-stats">Очистить статистику</button></div>` : '<p class="muted">Пока пусто: ученики ещё не задавали Сове вопросов по темам библиотеки.</p><button class="btn" data-action="t-refresh">↻ Обновить</button>'}
+    ${reports.length ? `<details><summary>Жалобы «Тут ошибка» на этом устройстве: ${reports.length}</summary><ul class="list">${reports.slice(-20).reverse().map((r) => `<li><strong>${esc(r.q || '')}</strong><br><span class="muted small">${esc((r.a || '').slice(0, 200))}</span></li>`).join('')}</ul></details>` : ''}
+  </section>
+
+  <section class="step">
+    <h3>🔀 Редактор схем</h3>
+    <p class="muted">Вставьте параграф — нейросеть предложит схему причин и следствий. Каждая связь подтверждается цитатой; связи без цитаты убираются автоматически. Проверьте схему и одобрите — тогда она появится у учеников.</p>
+    ${canExtract ? '' : `<div class="info">${S.server ? 'Нейросеть на коробке не запущена: запустите Ollama и скачайте модель (<code>ollama pull qwen2.5:3b</code>), затем перезапустите сервер.' : 'Это сайт без коробки. Построение схем работает на школьной коробке: запустите «Запустить.bat» или <code>python server/server.py</code> с Ollama.'}</div>`}
+    <form data-form="extract" class="stack">
+      <textarea name="text" rows="7" placeholder="Текст параграфа…" aria-label="Текст параграфа" ${canExtract ? '' : 'disabled'}>${esc(t.text)}</textarea>
+      <div class="row"><button class="btn primary" ${canExtract && !t.busy ? '' : 'disabled'}>${t.busy ? 'Строю схему… это может занять минуту' : 'Построить схему'}</button>
+      <button type="button" class="btn ghost" data-action="sample-text" ${canExtract ? '' : 'disabled'}>Вставить пример</button></div>
+    </form>
+    ${t.error ? `<div class="info bad" role="alert">${esc(t.error)}</div>` : ''}
+    ${t.graph ? `
+      <h3>Черновик: <input class="title-input" value="${esc(t.graph.title)}" data-action-input="t-title" aria-label="Название схемы"></h3>
+      ${t.notes.length ? `<details class="notes"><summary>Проверка цитат: ${t.notes.length} замечаний</summary><ul>${t.notes.map((n) => `<li>${esc(n)}</li>`).join('')}</ul></details>` : '<p class="muted">Все связи подтверждены цитатами.</p>'}
+      <div class="graph-wrap" id="graph"></div>
+      <h3>Связи</h3>
+      <ul class="edges-edit">${t.graph.edges.map((e, i) => `<li><button class="chip" data-action="t-sign" data-i="${i}" aria-label="Сменить знак связи">${e.sign > 0 ? '+' : '−'}</button> ${esc(nodeLabel(t.graph, e.from))} → ${esc(nodeLabel(t.graph, e.to))} <span class="muted small">«${esc(e.evidence)}»</span> <button class="link" data-action="t-del" data-i="${i}">удалить</button></li>`).join('')}</ul>
+      <div class="row"><button class="btn primary" data-action="t-publish">Одобрить схему ✓</button><button class="btn" data-action="t-download">Скачать JSON</button></div>` : ''}
+  </section>`;
   if (t.graph) renderGraph(document.getElementById('graph'), t.graph, {});
+}
+
+async function loadSummary() {
+  const t = S.teacher;
+  t.summary = [];
+  try {
+    t.summary = S.server ? (await fetch('api/teacher/summary', { headers: { 'X-Teacher-Token': S.auth } }).then(async (r) => {
+      if (r.status === 403) { logoutTeacher(); throw new Error('expired'); }
+      return r.json();
+    })).topics : localSummary();
+  } catch { /* вход истёк или коробка недоступна */ }
+  if (location.hash.startsWith('#/teacher')) viewTeacher();
+}
+
+// ---------- как подключить коробку ----------
+const ICONS = {
+  box: '<svg viewBox="0 0 64 64" aria-hidden="true"><rect x="8" y="14" width="48" height="30" rx="4" fill="none" stroke="currentColor" stroke-width="3"/><path d="M4 50h56" stroke="currentColor" stroke-width="3" stroke-linecap="round"/><path d="M27 29l5 5 9-10" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/><path d="M32 44v6" stroke="currentColor" stroke-width="3"/></svg>',
+  share: '<svg viewBox="0 0 64 64" aria-hidden="true"><circle cx="32" cy="40" r="4" fill="currentColor"/><path d="M22 30a14 14 0 0 1 20 0M15 23a24 24 0 0 1 34 0M8 16a34 34 0 0 1 48 0" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round"/><path d="M32 44v12M24 56h16" stroke="currentColor" stroke-width="3" stroke-linecap="round"/></svg>',
+  qr: '<svg viewBox="0 0 64 64" aria-hidden="true"><rect x="16" y="6" width="32" height="52" rx="5" fill="none" stroke="currentColor" stroke-width="3"/><rect x="23" y="16" width="8" height="8" fill="currentColor"/><rect x="33" y="16" width="8" height="8" fill="currentColor"/><rect x="23" y="26" width="8" height="8" fill="currentColor"/><rect x="35" y="28" width="4" height="4" fill="currentColor"/><path d="M28 48h8" stroke="currentColor" stroke-width="3" stroke-linecap="round"/></svg>',
+  learn: '<svg viewBox="0 0 64 64" aria-hidden="true"><path d="M6 14c9-3 18-3 26 3 8-6 17-6 26-3v36c-9-3-18-3-26 3-8-6-17-6-26-3z" fill="none" stroke="currentColor" stroke-width="3" stroke-linejoin="round"/><path d="M32 17v36" stroke="currentColor" stroke-width="3"/><circle cx="19" cy="28" r="3" fill="currentColor"/><circle cx="45" cy="28" r="3" fill="currentColor"/></svg>',
+};
+
+function connectAddresses() {
+  if (S.server?.lan?.length) return S.server.lan;
+  if (!S.server && /^https?:/.test(location.protocol) && !/^(localhost|127\.|\[::1\])/.test(location.hostname)) return [location.origin + location.pathname];
+  return [];
+}
+
+function viewConnect() {
+  const urls = connectAddresses();
+  const pick = urls.includes(S.qrUrl) ? S.qrUrl : urls[0];
+  const checks = store.get('checklist', {});
+  const need = [
+    ['laptop', 'Ноутбук или мини-компьютер (это и есть «Коробка»). Для нейросети нужно от 8 ГБ памяти, без неё подойдёт любой.'],
+    ['folder', 'Папка «Знание в коробке» на этом компьютере (скопируй с флешки или скачай один раз).'],
+    ['python', 'Программа Python — ставится один раз, бесплатно.'],
+    ['ollama', 'Программа Ollama и модель для Совы — по желанию: без неё Сова отвечает подсказками из книг.'],
+    ['phones', 'Телефоны, планшеты или компьютеры учеников — подойдёт любой браузер.'],
+    ['power', 'Розетка или заряженный аккумулятор.'],
+  ];
+  let qrBlock;
+  if (pick) {
+    qrBlock = `<div class="qr-card"><div class="qr">${qrSVG(pick, { size: 220, label: `QR-код адреса ${pick}` })}</div>
+      <div><p><strong>Адрес для телефонов:</strong></p><p class="addr">${esc(pick)}</p>
+      ${urls.length > 1 ? `<label class="muted small">Другой адрес этой коробки <select data-action-change="qr-url">${urls.map((u) => `<option ${u === pick ? 'selected' : ''}>${esc(u)}</option>`).join('')}</select></label>` : ''}
+      <p class="muted small">Если камера не открывает ссылку, введи адрес в браузере вручную. Телефон должен быть подключён к раздаче Коробки.</p>
+      <button class="btn" data-action="print">🖨 Распечатать QR-код для класса</button></div></div>`;
+  } else if (S.server) {
+    qrBlock = `<div class="info">Сейчас Коробка открыта только для этого компьютера. Закрой окно сервера и запусти <strong>«Запустить для класса.bat»</strong> — тогда здесь появится QR-код для телефонов. Если раздача уже включена, а кода нет — обнови страницу.</div>`;
+  } else {
+    qrBlock = '<div class="info">QR-код появится, когда сайт открыт с Коробки в режиме «для класса» или по сетевому адресу.</div>';
+  }
+  app.innerHTML = `
+  <h1>Как подключить Коробку</h1>
+  <p class="lead">Четыре шага — и весь класс учится без интернета. Справится любой: и ученик, и учитель.</p>
+  <ol class="steps4">
+    <li><span class="ico">${ICONS.box}</span><span class="n">1</span><strong>Включи Коробку</strong><span>Подключи ноутбук к розетке и дважды нажми <b>«Запустить для класса»</b> в папке проекта.</span></li>
+    <li><span class="ico">${ICONS.share}</span><span class="n">2</span><strong>Включи раздачу сети</strong><span>В Windows: Параметры → Сеть → <b>«Мобильный хот-спот»</b> → Вкл. Интернет для этого не нужен.</span></li>
+    <li><span class="ico">${ICONS.qr}</span><span class="n">3</span><strong>Наведи камеру на QR-код</strong><span>Ученики подключаются к раздаче Коробки и сканируют код ниже — сайт откроется сам.</span></li>
+    <li><span class="ico">${ICONS.learn}</span><span class="n">4</span><strong>Учись без интернета!</strong><span>Книги, Сова и схемы «Что будет, если…» уже внутри Коробки.</span></li>
+  </ol>
+  <h2>QR-код для телефонов</h2>
+  ${qrBlock}
+  <p class="muted small">Если Windows спросит, разрешить ли Python доступ к сети, — нажми «Разрешить» (для частных сетей).</p>
+
+  <h2>Как это устроено внутри (простыми словами)</h2>
+  <figure class="inside">
+    <svg viewBox="0 0 640 300" role="img" aria-labelledby="inside-t">
+      <title id="inside-t">Коробка содержит библиотеку, Сову и симулятор; телефоны учеников подключаются к ней напрямую, интернет не нужен</title>
+      <rect x="150" y="20" width="340" height="260" rx="18" class="in-box"/>
+      <text x="320" y="50" class="in-title">Коробка</text>
+      <g transform="translate(175 70)"><rect width="290" height="56" rx="10" class="in-item"/><text x="16" y="35" class="in-text">📚 Библиотека — книжный шкаф</text></g>
+      <g transform="translate(175 136)"><rect width="290" height="56" rx="10" class="in-item"/><text x="16" y="35" class="in-text">🦉 Сова — читает только их</text></g>
+      <g transform="translate(175 202)"><rect width="290" height="56" rx="10" class="in-item"/><text x="16" y="35" class="in-text">🔀 Симулятор последствий</text></g>
+      <g class="in-phone"><rect x="30" y="60" width="60" height="100" rx="10"/><rect x="30" y="180" width="60" height="100" rx="10"/><rect x="550" y="120" width="60" height="100" rx="10"/></g>
+      <path d="M90 110H150M90 230H150M490 170H550" class="in-link"/>
+      <g transform="translate(540 30)"><path d="M10 40a18 18 0 0 1 4-35 24 24 0 0 1 44 6 15 15 0 0 1 2 29z" class="in-cloud"/><path d="M8 6l56 40" class="in-cross"/></g>
+      <text x="575" y="95" class="in-small">не нужен</text>
+    </svg>
+  </figure>
+  <div class="cards analogies">
+    <div class="card"><span class="icon">📚</span><strong>Библиотека = книжный шкаф</strong><span class="muted">400 тем по истории Казахстана, физике, алгебре и геометрии лежат внутри Коробки.</span></div>
+    <div class="card"><span class="icon">🦉</span><strong>Сова = умный помощник</strong><span class="muted">Читает только книги из шкафа и не выдумывает. Если ответа там нет — так и говорит, а ответ нейросети помечает знаком ⚠.</span></div>
+    <div class="card"><span class="icon">🔀</span><strong>Симулятор = конструктор последствий</strong><span class="muted">Меняешь одно условие — и видишь, что произойдёт дальше по цепочке.</span></div>
+    <div class="card"><span class="icon">🚫</span><strong>Интернет = не нужен</strong><span class="muted">Всё уже внутри. Вопросы учеников никуда не уходят.</span></div>
+  </div>
+
+  <h2>Что нужно для запуска</h2>
+  <ul class="checklist">${need.map(([id, text]) => `<li><label><input type="checkbox" data-action-change="check" data-id="${id}" ${checks[id] ? 'checked' : ''}><span>${esc(text)}</span></label></li>`).join('')}</ul>
+  <p class="muted small">Подробная инструкция — в файле README.md в папке проекта. Нейросеть включается отдельно: <a href="#/ai">как включить нейросеть</a>.</p>`;
 }
 
 async function extractGraph(text) {
@@ -575,7 +752,7 @@ async function extractGraph(text) {
   t.error = '';
   viewTeacher();
   try {
-    const r = await postJSON('api/extract', { text });
+    const r = await teacherPost('api/extract', { text });
     t.graph = r.graph;
     t.notes = r.notes || [];
     if (!t.graph.edges.length) t.error = 'Модель не нашла связей, подтверждённых текстом. Попробуйте более подробный параграф.';
@@ -592,10 +769,28 @@ const actions = {
   'ask-example': (d) => sendChat(d.q),
   'lib-grade': (d) => { S.lf.grade = d.g; viewLibrary(location.hash.split('/')[2]); },
   'ask-about': (d) => { location.hash = '#/sova'; setTimeout(() => sendChat(`Расскажи про тему «${d.title}»`), 0); },
+  'speak-doc': async (d, el) => {
+    const doc = document.getElementById('doc');
+    showTTSNote(await speak(doc.innerText, el, { serverTTS: S.server?.tts }));
+  },
+  'speak-msg': async (d, el) => {
+    const m = S.chat.messages[Number(d.i)];
+    showTTSNote(await speak(m.text, el, { serverTTS: S.server?.tts }));
+  },
+  't-logout': () => { logoutTeacher(); S.teacher.summary = null; viewTeacher(); },
+  't-reset-stats': async () => {
+    if (!confirm('Очистить статистику тем? Это нельзя отменить.')) return;
+    try { if (S.server) await teacherPost('api/teacher/reset-stats', {}); else resetLocalStats(); } catch (e) { S.teacher.error = e.message; }
+    S.teacher.summary = null; viewTeacher();
+  },
+  print: () => window.print(),
+  't-refresh': () => { S.teacher.summary = null; viewTeacher(); },
   'hint-more': () => askSova(S.chat.lastQuestion, Math.min(2, (S.chat.messages.at(-1).level || 0) + 1), 'socratic'),
   'show-answer': () => askSova(S.chat.lastQuestion, 2, 'socratic'),
   simpler: () => askSova(S.chat.lastQuestion, 0, 'simpler'),
   report: () => {
+    if (S.server) postJSON('api/report', { question: S.chat.lastQuestion }).catch(() => {});
+    else { const top = S.lib.search(S.chat.lastQuestion); if (RELEVANT(top)) recordLocal(top[0].docId, top[0].title, 'report'); }
     store.set('reports', [...store.get('reports', []), { q: S.chat.lastQuestion, a: S.chat.messages.at(-1)?.text, at: Date.now() }]);
     S.chat.messages.push({ role: 'assistant', text: 'Спасибо! Я записала этот случай — учитель проверит ответ. Ты молодец, что проверяешь ИИ.' });
     viewSova();
@@ -636,7 +831,7 @@ const actions = {
   't-del': (d) => { S.teacher.graph.edges.splice(Number(d.i), 1); viewTeacher(); },
   't-publish': async () => {
     try {
-      const r = await postJSON('api/graphs', { graph: S.teacher.graph });
+      const r = await teacherPost('api/graphs', { graph: S.teacher.graph });
       S.graphs = S.graphs.filter((g) => g.id !== r.id).concat({ ...S.teacher.graph, id: r.id, verified_by_teacher: true });
       location.hash = `#/explore/${r.id}`;
     } catch (e) { S.teacher.error = e.message; viewTeacher(); }
@@ -663,8 +858,29 @@ app.addEventListener('input', (ev) => {
   } else if (a === 't-title') S.teacher.graph.title = ev.target.value;
   else if (a === 'lib-q') { S.lf.q = ev.target.value; renderLibList(location.hash.split('/')[2]); }
 });
+function showTTSNote(msg) {
+  let el = document.getElementById('tts-note');
+  if (!el) { el = document.createElement('p'); el.id = 'tts-note'; el.className = 'muted small'; document.querySelector('#doc')?.after(el); }
+  if (!el) return;
+  el.textContent = msg;
+  el.hidden = !msg;
+}
+
+async function setExam(on) {
+  try {
+    if (S.server) S.exam = (await teacherPost('api/settings', { exam: on })).exam;
+    else { setLocalExam(on); S.exam = on; }
+  } catch (e) { S.teacher.error = e.message; }
+  renderStatus();
+  viewTeacher();
+}
+
 app.addEventListener('change', (ev) => {
-  if (ev.target.dataset.actionChange === 'grade') { S.chat.grade = Number(ev.target.value); store.set('grade', S.chat.grade); }
+  const ac = ev.target.dataset.actionChange;
+  if (ac === 'grade') { S.chat.grade = Number(ev.target.value); store.set('grade', S.chat.grade); }
+  if (ac === 'exam') setExam(ev.target.checked);
+  if (ac === 'qr-url') { S.qrUrl = ev.target.value; viewConnect(); }
+  if (ac === 'check') { const c = store.get('checklist', {}); c[ev.target.dataset.id] = ev.target.checked; store.set('checklist', c); }
   if (ev.target.dataset.actionInput === 'slider') drawPanel();
 });
 app.addEventListener('submit', (ev) => {
@@ -672,6 +888,21 @@ app.addEventListener('submit', (ev) => {
   const form = ev.target;
   if (form.dataset.form === 'chat') { const v = form.q.value; form.q.value = ''; sendChat(v); }
   if (form.dataset.form === 'extract') extractGraph(form.text.value);
+  if (form.dataset.form === 'pin') {
+    const pin = form.pin.value;
+    form.pin.value = '';
+    login(pin, !!S.server).then((token) => {
+      S.auth = token; setToken(token); S.teacher.pinError = ''; S.teacher.summary = null; viewTeacher();
+    }).catch((e) => { S.teacher.pinError = e.message; viewTeacher(); document.getElementById('pin')?.focus(); });
+  }
+});
+
+// ---------- тема оформления ----------
+document.getElementById('theme-slot').innerHTML = themeSwitcher();
+applyTheme(currentTheme());
+document.getElementById('theme-slot').addEventListener('click', (ev) => {
+  const b = ev.target.closest('[data-theme-btn]');
+  if (b) setTheme(b.dataset.themeBtn);
 });
 
 // ---------- офлайн-режим ----------

@@ -107,3 +107,25 @@ test('офлайн-режим: в кэш service worker входят все фа
   const sw = readFileSync(new URL('../web/sw.js', import.meta.url), 'utf8');
   for (const f of files) assert.ok(sw.includes(`'${f}'`), `файл ${f} не попадает в офлайн-кэш — добавь его в FILES в web/sw.js`);
 });
+
+test('QR-код: верная матрица (сверена с эталонной библиотекой qrcode) и все версии строятся', async () => {
+  const { qrMatrix, qrSVG } = await import('../web/js/qr.js');
+  const m = qrMatrix('http://192.168.137.1:8000/', 2).map((r) => r.map((b) => (b ? 1 : 0)).join('')).join('');
+  let h = 0;
+  for (const c of m) h = (h * 31 + Number(c)) >>> 0;
+  assert.equal(m.length, 625); // версия 2, 25×25
+  assert.equal(h, 1713036324);
+  for (const len of [1, 30, 80, 150, 213]) {
+    const q = qrMatrix('x'.repeat(len));
+    assert.equal(q.length, q[0].length);
+    assert.deepEqual(q[0].slice(0, 7), Array(7).fill(true), 'поисковый узор в углу');
+  }
+  assert.throws(() => qrMatrix('x'.repeat(300)));
+  assert.match(qrSVG('http://a/'), /^<svg/);
+});
+
+test('PIN учителя: хэш в браузере совпадает с сервером', async () => {
+  const { hashPin, PIN_HASH } = await import('../web/js/teacher.js');
+  assert.equal(await hashPin('2026'), PIN_HASH);
+  assert.notEqual(await hashPin('2025'), PIN_HASH);
+});

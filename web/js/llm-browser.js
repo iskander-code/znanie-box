@@ -60,7 +60,7 @@ export async function chatBrowser(model, messages) {
   const r = await fetch(`${OLLAMA}/api/chat`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ model, messages, stream: false, options: { temperature: 0.3 }, ...(THINKING.test(model) ? { think: false } : {}) }),
+    body: JSON.stringify({ model, messages, stream: false, keep_alive: '60m', options: { temperature: 0.3, num_ctx: 4096 }, ...(THINKING.test(model) ? { think: false } : {}) }),
   });
   if (!r.ok) throw new Error(`Ollama ответила ${r.status}`);
   return cleanAnswer((await r.json()).message.content);

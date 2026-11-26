@@ -5,7 +5,12 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Знание в коробке</title>
   <meta name="description" content="Офлайн-библиотека с ИИ-наставником и визуализатором причинно-следственных связей для школ без интернета">
-  <meta name="theme-color" content="#1f6f5c">
+  <meta name="theme-color" content="#F8FAFC">
+  <script>
+    // Тема ставится до отрисовки, чтобы страница не мигала.
+    try { var t = localStorage.getItem('theme'); } catch (e) {}
+    document.documentElement.dataset.theme = /^(light|dark|a11y)$/.test(t || '') ? t : (matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light');
+  </script>
   <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%231f6f5c'/%3E%3Cpath d='M8 10h16v14H8z' fill='none' stroke='white' stroke-width='2.5'/%3E%3Cpath d='M8 10l8 5 8-5' fill='none' stroke='white' stroke-width='2.5'/%3E%3C/svg%3E">
   <link rel="manifest" href="manifest.webmanifest">
   <link rel="apple-touch-icon" href="icon.svg">
@@ -20,7 +25,9 @@
       <a href="#/build" data-view="build">Собери сам</a>
       <a href="#/library" data-view="library">Библиотека</a>
       <a href="#/teacher" data-view="teacher">Учителю</a>
+      <a href="#/connect" data-view="connect">Как подключить</a>
     </nav>
+    <span id="theme-slot"></span>
     <span id="offline" class="status" hidden></span>
     <span id="status" class="status">…</span>
   </header>

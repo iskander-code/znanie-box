@@ -3,6 +3,7 @@ import json
 import sys
 import threading
 import unittest
+import urllib.error
 import urllib.request
 from functools import partial
 from http.server import ThreadingHTTPServer
@@ -11,8 +12,11 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "server"))
 
+import tempfile  # noqa: E402
+
 from graphs import evidence_found, validate  # noqa: E402
 from rag import Library, is_relevant, stem  # noqa: E402
+from teacher import PIN_HASH, Teacher, hash_pin  # noqa: E402
 
 LIBRARY = ROOT / "web" / "data" / "library"
 
@@ -78,10 +82,46 @@ class GraphValidationTest(unittest.TestCase):
         self.assertIn("обоих факторах", notes[0])
 
 
+class TeacherTest(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.t = Teacher(Path(self.tmp.name) / "state.json")
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def test_default_pin_hash_matches_browser(self):
+        self.assertEqual(hash_pin("2026"), PIN_HASH)
+        self.assertIn(PIN_HASH, (ROOT / "web" / "js" / "teacher.js").read_text(encoding="utf-8"))
+
+    def test_login_and_lockout(self):
+        token, _ = self.t.login("2026")
+        self.assertTrue(self.t.check(token))
+        self.assertFalse(self.t.check("чужой"))
+        for _ in range(5):
+            self.assertIsNone(self.t.login("0000")[0])
+        token2, msg = self.t.login("2026")
+        self.assertIsNone(token2, "после 5 ошибок вход заблокирован даже с верным PIN")
+        self.assertIn("Подождите", msg)
+
+    def test_stats_are_anonymous_and_ranked(self):
+        self.t.record("a", "Тема А", "question")
+        for kind in ("question", "hint", "answer", "report"):
+            self.t.record("b", "Тема Б", kind)
+        rows = self.t.summary()
+        self.assertEqual([r["docId"] for r in rows], ["b", "a"])
+        self.assertEqual(set(rows[0]), {"docId", "title", "question", "hint", "answer", "report", "score"})
+        self.t.set_exam(True)
+        self.assertTrue(Teacher(self.t.file).exam, "режим контрольной сохраняется на диск")
+
+
 class ServerTest(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         import server
+        cls.server = server
+        cls.tmp = tempfile.TemporaryDirectory()
+        server.TEACHER = Teacher(Path(cls.tmp.name) / "state.json")
         cls.httpd = ThreadingHTTPServer(("127.0.0.1", 0), partial(server.Handler, directory=str(server.WEB)))
         cls.base = f"http://127.0.0.1:{cls.httpd.server_address[1]}"
         threading.Thread(target=cls.httpd.serve_forever, daemon=True).start()
@@ -89,15 +129,24 @@ class ServerTest(unittest.TestCase):
     @classmethod
     def tearDownClass(cls):
         cls.httpd.shutdown()
+        cls.tmp.cleanup()
 
     def get(self, path):
         with urllib.request.urlopen(self.base + path, timeout=10) as r:
             return r.headers, r.read()
 
-    def post(self, path, body):
-        req = urllib.request.Request(self.base + path, data=json.dumps(body).encode(), headers={"Content-Type": "application/json"})
-        with urllib.request.urlopen(req, timeout=60) as r:
+    def post(self, path, body, token=None):
+        headers = {"Content-Type": "application/json", **({"X-Teacher-Token": token} if token else {})}
+        req = urllib.request.Request(self.base + path, data=json.dumps(body).encode(), headers=headers)
+        with urllib.request.urlopen(req, timeout=120) as r:
             return json.loads(r.read())
+
+    def status(self, path, body, token=None):
+        try:
+            self.post(path, body, token)
+            return 200
+        except urllib.error.HTTPError as e:
+            return e.code
 
     def test_static_and_mime(self):
         headers, _ = self.get("/js/app.js")
@@ -113,6 +162,33 @@ class ServerTest(unittest.TestCase):
         r = self.post("/api/chat", {"message": "Кто основал Казахское ханство?", "mode": "socratic", "level": 0})
         self.assertTrue(r["fragments"])
         self.assertTrue(r["fragments"][0]["relevant"])
+
+    def test_teacher_endpoints_need_pin(self):
+        self.assertEqual(self.status("/api/settings", {"exam": True}), 403)
+        self.assertEqual(self.status("/api/graphs", {"graph": {"nodes": [1], "edges": [1]}}), 403)
+        self.assertEqual(self.status("/api/extract", {"text": "x" * 100}), 403)
+        self.assertEqual(self.status("/api/teacher/login", {"pin": "1111"}), 403)
+        token = self.post("/api/teacher/login", {"pin": "2026"})["token"]
+        req = urllib.request.Request(self.base + "/api/teacher/summary", headers={"X-Teacher-Token": token})
+        with urllib.request.urlopen(req, timeout=10) as r:
+            self.assertIn("topics", json.loads(r.read()))
+        self.assertEqual(self.status("/api/settings", {"exam": False}, token), 200)
+
+    def test_exam_mode_blocks_ready_answers(self):
+        token = self.post("/api/teacher/login", {"pin": "2026"})["token"]
+        self.post("/api/settings", {"exam": True}, token)
+        try:
+            _, raw = self.get("/api/settings")
+            self.assertTrue(json.loads(raw)["exam"])
+            r = self.post("/api/chat", {"message": "Почему небо голубое?", "mode": "socratic", "level": 0})
+            self.assertTrue(r["exam"])
+            self.assertIn("контрольная", r["answer"])
+            r = self.post("/api/chat", {"message": "Что такое закон Ома?", "mode": "explain", "level": 2})
+            self.assertTrue(r["exam"])
+            if r.get("answer") is None:
+                self.assertEqual(r["level"], 1, "сервер понижает уровень до подсказки")
+        finally:
+            self.post("/api/settings", {"exam": False}, token)
 
 
 if __name__ == "__main__":

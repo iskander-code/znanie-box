@@ -12,6 +12,7 @@ from __future__ import annotations
 import argparse
 import json
 import re
+import socket
 import sys
 import threading
 from functools import partial
@@ -22,14 +23,34 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import llm  # noqa: E402
+import tts  # noqa: E402
 from graphs import extract  # noqa: E402
 from rag import Library, is_relevant  # noqa: E402
+from teacher import Teacher, hash_pin  # noqa: E402
 
 ROOT = Path(__file__).resolve().parent.parent
 WEB = ROOT / "web"
 USER_GRAPHS = ROOT / "data" / "user_graphs"
 LIB = Library(WEB / "data" / "library")
+TEACHER = Teacher(ROOT / "data" / "state.json")
 MAX_BODY = 200_000
+EXAM_GENERAL = "Сейчас идёт контрольная: Сова помогает только подсказками по темам школьной библиотеки. Попробуй спросить про тему из учебника."
+
+
+def lan_addresses() -> list[str]:
+    """Адреса этого компьютера в локальной сети — для QR-кода на странице «Как подключить»."""
+    found = set()
+    try:
+        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
+            s.connect(("10.255.255.255", 1))  # пакеты не отправляются, просто выбирается сетевая карта
+            found.add(s.getsockname()[0])
+    except OSError:
+        pass
+    try:
+        found.update(a for a in socket.gethostbyname_ex(socket.gethostname())[2])
+    except OSError:
+        pass
+    return sorted(a for a in found if not a.startswith(("127.", "169.254.")))
 
 GENERAL = (
     "Ты — Сова, доброжелательный наставник школьника {grade} класса в Казахстане. "
@@ -113,6 +134,12 @@ class Handler(SimpleHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(raw)
 
+    def _teacher(self) -> bool:
+        return TEACHER.check(self.headers.get("X-Teacher-Token"))
+
+    def _denied(self):
+        return self._json({"error": "Нужен вход учителя по PIN-коду"}, HTTPStatus.FORBIDDEN)
+
     def _body(self) -> dict:
         n = int(self.headers.get("Content-Length") or 0)
         if n > MAX_BODY:
@@ -122,7 +149,16 @@ class Handler(SimpleHTTPRequestHandler):
     def do_GET(self):
         path = self.path.split("?")[0]
         if path == "/api/health":
-            return self._json({"ok": True, **llm.status()})
+            host, port = self.server.server_address[:2]
+            box = host == "0.0.0.0"
+            lan = [f"http://{a}:{port}/" for a in lan_addresses()] if box else []
+            return self._json({"ok": True, **llm.status(), "tts": tts.available(), "exam": TEACHER.exam, "box": box, "lan": lan})
+        if path == "/api/settings":
+            return self._json({"exam": TEACHER.exam})
+        if path == "/api/teacher/summary":
+            if not self._teacher():
+                return self._denied()
+            return self._json({"topics": TEACHER.summary()})
         if path == "/api/graphs":
             USER_GRAPHS.mkdir(parents=True, exist_ok=True)
             graphs = [json.loads(p.read_text(encoding="utf-8")) for p in sorted(USER_GRAPHS.glob("*.json"))]
@@ -137,7 +173,40 @@ class Handler(SimpleHTTPRequestHandler):
                 return self._json(LIB.search(str(body.get("query", ""))))
             if path == "/api/chat":
                 return self._chat(body)
+            if path == "/api/teacher/login":
+                token, msg = TEACHER.login(str(body.get("pin", "")))
+                return self._json({"token": token} if token else {"error": msg}, HTTPStatus.OK if token else HTTPStatus.FORBIDDEN)
+            if path == "/api/teacher/logout":
+                TEACHER.logout(self.headers.get("X-Teacher-Token"))
+                return self._json({"ok": True})
+            if path == "/api/settings":
+                if not self._teacher():
+                    return self._denied()
+                TEACHER.set_exam(bool(body.get("exam")))
+                return self._json({"exam": TEACHER.exam})
+            if path == "/api/teacher/reset-stats":
+                if not self._teacher():
+                    return self._denied()
+                TEACHER.reset_stats()
+                return self._json({"ok": True})
+            if path == "/api/report":
+                fr = LIB.search(str(body.get("question", "")))
+                if is_relevant(fr):
+                    TEACHER.record(fr[0]["docId"], fr[0]["title"], "report")
+                return self._json({"ok": True})
+            if path == "/api/tts":
+                if not tts.available():
+                    return self._json({"error": "Piper не установлен"}, HTTPStatus.NOT_IMPLEMENTED)
+                audio = tts.synthesize(str(body.get("text", "")))
+                self.send_response(HTTPStatus.OK)
+                self.send_header("Content-Type", "audio/wav")
+                self.send_header("Content-Length", str(len(audio)))
+                self.end_headers()
+                self.wfile.write(audio)
+                return None
             if path == "/api/extract":
+                if not self._teacher():
+                    return self._denied()
                 text = str(body.get("text", "")).strip()
                 if len(text) < 80:
                     return self._json({"error": "Вставьте текст параграфа хотя бы из нескольких предложений"}, HTTPStatus.BAD_REQUEST)
@@ -146,6 +215,8 @@ class Handler(SimpleHTTPRequestHandler):
                 graph, notes = extract(text[:6000])
                 return self._json({"graph": graph, "notes": notes})
             if path == "/api/graphs":
+                if not self._teacher():
+                    return self._denied()
                 return self._save_graph(body)
             return self._json({"error": "Нет такого адреса"}, HTTPStatus.NOT_FOUND)
         except (ValueError, KeyError, json.JSONDecodeError) as e:
@@ -164,20 +235,31 @@ class Handler(SimpleHTTPRequestHandler):
         relevant = is_relevant(fragments)
         for f in fragments:
             f["relevant"] = relevant
+        level = int(body.get("level", 0))
+        if relevant:
+            wants_answer = mode in ("explain", "simpler") or level >= 2
+            TEACHER.record(fragments[0]["docId"], fragments[0]["title"], "answer" if wants_answer else "hint" if level else "question")
+        exam = TEACHER.exam
+        if exam:
+            # Контрольная: никаких готовых ответов, только подсказки — проверяется здесь, а не в браузере.
+            body = {**body, "mode": "socratic", "level": min(level, 1)}
+            mode = "socratic"
+            if not relevant:
+                return self._json({"fragments": [], "answer": EXAM_GENERAL, "exam": True, "llm": bool(llm.model()), "model": "контрольная"})
         if not llm.model():
-            return self._json({"fragments": fragments, "answer": None, "llm": False})
+            return self._json({"fragments": fragments, "answer": None, "llm": False, "exam": exam, "level": body.get("level", 0)})
         if not relevant:
             # В библиотеке ничего нет — нейросеть отвечает из своих знаний, интерфейс помечает это.
             history = [m for m in body.get("history", [])[-6:] if m.get("role") in ("user", "assistant")]
             msgs = [{"role": "system", "content": GENERAL.format(grade=body.get("grade", 8))}, *history,
                     {"role": "user", "content": str(body.get("message", ""))[:1000]}]
             answer = clean_answer(llm.chat(msgs))
-            return self._json({"fragments": [], "answer": answer, "general": True, "llm": True, "model": llm.model()})
+            return self._json({"fragments": [], "answer": answer, "general": True, "llm": True, "model": llm.model(), "exam": exam})
         answer = clean_answer(llm.chat(tutor_messages(body, fragments[:3])))
         if mode == "socratic" and int(body.get("level", 0)) < 2 and "?" not in answer:
             # Модель выдала ответ вместо наводящего вопроса — отдаём проверенную подсказку-шаблон.
-            return self._json({"fragments": fragments, "answer": None, "llm": True})
-        return self._json({"fragments": fragments, "answer": answer, "llm": True, "model": llm.model()})
+            return self._json({"fragments": fragments, "answer": None, "llm": True, "exam": exam, "level": body.get("level", 0)})
+        return self._json({"fragments": fragments, "answer": answer, "llm": True, "model": llm.model(), "exam": exam})
 
     def _save_graph(self, body: dict):
         g = body.get("graph") or {}
@@ -195,11 +277,17 @@ def main():
     ap = argparse.ArgumentParser(description="Знание в коробке — школьный сервер без интернета")
     ap.add_argument("--box", action="store_true", help="открыть доступ для других устройств локальной сети")
     ap.add_argument("--port", type=int, default=8000)
+    ap.add_argument("--pin", help="PIN учителя для этого запуска (по умолчанию 2026, см. server/teacher.py)")
     args = ap.parse_args()
+    if args.pin:
+        TEACHER.pin_hash = hash_pin(args.pin)
     host = "0.0.0.0" if args.box else "127.0.0.1"
     server = ThreadingHTTPServer((host, args.port), partial(Handler, directory=str(WEB)))
     st = llm.status()
     print(f"Знание в коробке: http://localhost:{args.port}")
+    if args.box:
+        for a in lan_addresses():
+            print(f"  с телефонов и планшетов класса: http://{a}:{args.port}")
     print(f"Нейросеть: {'включена, модель ' + st['model'] if st['llm'] else 'не найдена, наставник работает в демо-режиме'} ({st['mode']})")
     if st["llm"] and st["mode"] == "local":
         # Прогрев: первая загрузка модели в память может занять минуту-две.

@@ -57,7 +57,10 @@ def chat(messages: list[dict], fmt: dict | None = None, temperature: float = 0.3
     m = model()
     if not m:
         raise RuntimeError("Модель недоступна: запустите Ollama и скачайте модель (ollama pull qwen2.5:3b)")
-    payload = {"model": m, "messages": messages, "stream": False, "options": {"temperature": temperature}}
+    # keep_alive: модель не выгружается из памяти между уроками (иначе каждый вопрос после паузы ждёт 10–20 с загрузки);
+    # num_ctx 4096 хватает на 3 фрагмента и историю, а памяти нужно меньше — важно для слабых устройств.
+    payload = {"model": m, "messages": messages, "stream": False, "keep_alive": "60m",
+               "options": {"temperature": temperature, "num_ctx": 4096}}
     if fmt is not None:
         payload["format"] = fmt
     if m.startswith(THINKING):
