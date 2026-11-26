@@ -290,3 +290,29 @@ section.step { margin: 14px 0; }
   .qr-card { border: 0; }
 }
 @media (max-width: 1200px) { [data-theme="a11y"] .explore { grid-template-columns: 1fr; } [data-theme="a11y"] .panel { position: static; } }
+
+/* ---------- «Собери сам» ---------- */
+.info.good { border-color: var(--pos); background: color-mix(in srgb, var(--pos) 12%, var(--surface)); }
+.bd-progress { height: 8px; border-radius: 999px; background: var(--line); overflow: hidden; margin: 6px 0 12px; }
+.bd-progress span { display: block; height: 100%; background: var(--pos); transition: width .4s; }
+.bd-text summary { cursor: pointer; min-height: var(--tap); display: flex; align-items: center; color: var(--muted); }
+.bd-text mark { background: var(--accent-soft); outline: 2px solid var(--accent); border-radius: 3px; padding: 0 2px; color: inherit; }
+.bd-card h3 { display: flex; gap: 8px; align-items: center; margin: 18px 0 8px; font-size: 1.02rem; }
+.bd-card h3 .n { flex: none; }
+.bd-quote { font-size: 1.08rem; font-style: normal; font-weight: 600; }
+.bd-chips { display: flex; flex-wrap: wrap; gap: 8px; }
+.bd-chip { text-align: left; }
+.bd-chip.on { background: var(--accent); border-color: var(--accent); color: var(--accent-ink); font-weight: 600; }
+.bd-chip:disabled { opacity: .4; cursor: default; }
+.bd-chip.on:disabled { opacity: 1; }
+.bd-signs { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+.bd-sign { font: inherit; text-align: left; display: flex; gap: 12px; align-items: center; min-height: var(--tap); padding: 10px 14px; border-radius: var(--radius); border: var(--border) solid var(--line); background: var(--surface); color: var(--ink); cursor: pointer; line-height: 1.35; }
+.bd-sign:hover:not(:disabled) { border-color: var(--accent); }
+.bd-sign.on { border-color: var(--accent); background: var(--accent-soft); box-shadow: inset 0 0 0 1px var(--accent); }
+.bd-sign:disabled { cursor: default; }
+.bd-sign-icon { flex: none; font-size: .9rem; letter-spacing: -1px; color: var(--accent); font-weight: 700; }
+.bd-blank { display: inline-block; min-width: 5em; border-bottom: 2px dashed var(--muted); color: var(--muted); font-style: italic; }
+#bd-feedback:not(:empty) { margin: 14px 0 4px; }
+.bd-h { margin-top: 22px; font-size: 1.15rem; }
+.bd-finish h2 { margin-top: 0; }
+@media (max-width: 640px) { .bd-signs { grid-template-columns: 1fr; } }

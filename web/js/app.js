@@ -1,4 +1,4 @@
-import { simulate, pathTo, findLoops, checkPredictions, compareGraphs, trend, DEFAULT_DELAY_LABELS } from './engine.js';
+import { simulate, pathTo, findLoops, checkPredictions, trend, DEFAULT_DELAY_LABELS } from './engine.js';
 import { renderGraph, esc } from './graph-view.js';
 import { Library, localAnswer, makeQuiz, checkQuiz, RELEVANT } from './tutor-local.js';
 import { detectBrowserLLM, chatBrowser, tutorMessages, generalMessages, DEBRIEF } from './llm-browser.js';
@@ -120,7 +120,7 @@ function viewHome() {
   <div class="cards big">
     <a class="card" href="#/sova"><span class="icon">🦉</span><strong>Спросить Сову</strong><span class="muted">Наставник ответит по книгам из библиотеки: сначала подсказкой, потом полным ответом</span></a>
     <a class="card" href="#/explore"><span class="icon">🔀</span><strong>Что будет, если…</strong><span class="muted">Измени одно условие в параграфе и проследи цепочку последствий</span></a>
-    <a class="card" href="#/build"><span class="icon">🧩</span><strong>Собери сам</strong><span class="muted">Построй схему причин и следствий сам и сравни с эталоном</span></a>
+    <a class="card" href="#/build"><span class="icon">🧩</span><strong>Собери сам</strong><span class="muted">Разбери параграф по фразам и собери схему причин и следствий</span></a>
     <a class="card" href="#/library"><span class="icon">📚</span><strong>Библиотека</strong><span class="muted">${S.texts.length} тем по истории Казахстана, физике, алгебре и геометрии</span></a>
     <a class="card" href="#/connect"><span class="icon">📱</span><strong>Как подключить Коробку</strong><span class="muted">4 простых шага и QR-код для телефонов класса</span></a>
   </div>
@@ -537,62 +537,155 @@ async function debriefWithSova() {
 }
 
 // ---------- «Собери сам» ----------
+// Пошагово: одна фраза из параграфа за раз и три простых вопроса — что причина, что следствие и как они связаны.
+// Схема растёт из найденных связей, поэтому её расположение не подсказывает ответ заранее.
+
+/** Перемешивание, одинаковое при каждом открытии одной и той же схемы. */
+function seededShuffle(items, seed) {
+  let h = 2166136261;
+  for (const ch of seed) h = Math.imul(h ^ ch.charCodeAt(0), 16777619);
+  const rnd = () => ((h = Math.imul(h ^ (h >>> 15), 2246822507) ^ Math.imul(h ^ (h >>> 13), 3266489909)) >>> 0) / 4294967296;
+  const a = [...items];
+  for (let i = a.length - 1; i > 0; i--) { const j = Math.floor(rnd() * (i + 1)); [a[i], a[j]] = [a[j], a[i]]; }
+  return a;
+}
+
+/** Параграф с подсвеченной фразой текущего шага (если фраза дословно есть в тексте). */
+function markEvidence(text, evidence) {
+  const i = evidence ? text.toLowerCase().indexOf(evidence.toLowerCase()) : -1;
+  if (i < 0) return esc(text);
+  return `${esc(text.slice(0, i))}<mark id="bd-mark">${esc(text.slice(i, i + evidence.length))}</mark>${esc(text.slice(i + evidence.length))}`;
+}
+
+/** Что именно не так в ответе ученика — чтобы подсказка была по делу, а не «неверно». */
+function buildFeedback(g, edge, pick) {
+  const L = (id) => `«${esc(nodeLabel(g, id))}»`;
+  if (pick.from === edge.to && pick.to === edge.from) return `Наоборот: в тексте ${L(edge.from)} влияет на ${L(edge.to)}, а не ${L(edge.to)} на ${L(edge.from)}. Что случилось сначала?`;
+  if (pick.from !== edge.from && pick.to !== edge.to) return 'Ни причина, ни следствие не совпали. Перечитай подсвеченную фразу: о каких двух вещах в ней говорится?';
+  if (pick.from !== edge.from) return `Следствие выбрано верно — ${L(edge.to)}. А что в этой фразе его меняет?`;
+  if (pick.to !== edge.to) return `Причина выбрана верно — ${L(edge.from)}. А что от неё меняется в этой фразе?`;
+  return `Причина и следствие верные. Но подумай ещё: если ${L(edge.from)} станет больше, ${L(edge.to)} станет больше или меньше?`;
+}
+
+function buildState(g) {
+  const saved = store.get(`build-${g.id}`, null);
+  const n = g.edges.length;
+  const valid = saved && Array.isArray(saved.done) && saved.done.every((d) => Number.isInteger(d.i) && d.i < n);
+  return {
+    graphId: g.id,
+    step: valid ? Math.min(saved.step, n) : 0,
+    done: valid ? saved.done : [], // [{ i: номер связи, first: с первой попытки }]
+    pick: { from: null, to: null, sign: 0 },
+    tries: 0,
+    feedback: '',
+    solved: false, // текущий шаг решён и ждёт «Дальше»
+    revealed: false,
+  };
+}
+const saveBuild = (b) => store.set(`build-${b.graphId}`, { step: b.step, done: b.done });
+
 function viewBuild(id) {
   const g = id && graphById(id);
   if (!g) {
-    app.innerHTML = `<h1>Собери сам</h1><p class="muted">Прочитай параграф и соедини факторы стрелками: что на что влияет и как. Потом сравни свою схему с эталоном.</p>${graphCards('build')}`;
+    app.innerHTML = `<h1>Собери сам</h1>
+    <p class="muted">Читаешь параграф по одной фразе и отвечаешь на три вопроса: <strong>что причина</strong>, <strong>что следствие</strong> и <strong>как они связаны</strong>. Из твоих ответов шаг за шагом складывается схема причин и следствий. Потом её можно «запустить» во вкладке «Что будет, если…».</p>
+    ${graphCards('build')}`;
     return;
   }
-  if (!S.bd || S.bd.graphId !== id) S.bd = { graphId: id, edges: store.get(`draft-${id}`, []), sign: 1, from: null, result: null, hint: '', showRef: false };
+  if (!S.bd || S.bd.graphId !== id) S.bd = buildState(g);
   const b = S.bd;
+  const total = g.edges.length;
+  const text = textOf(g);
+  const progress = `<div class="bd-progress" role="progressbar" aria-label="Найдено связей" aria-valuemin="0" aria-valuemax="${total}" aria-valuenow="${b.done.length}"><span style="width:${(b.done.length / total) * 100}%"></span></div>`;
+
+  // Готовая схема из найденных связей: только те факторы, которые уже участвуют.
+  const foundEdges = b.done.map((d) => g.edges[d.i]);
+  const used = new Set(foundEdges.flatMap((e) => [e.from, e.to]));
+  const partial = { ...g, nodes: g.nodes.filter((n) => used.has(n.id)), edges: foundEdges };
+
+  if (b.step >= total) {
+    const first = b.done.filter((d) => d.first).length;
+    app.innerHTML = `
+    <a class="back" href="#/build">← Все схемы</a>
+    <h1>Собери сам: ${esc(g.title)}</h1>
+    ${progress}
+    <div class="step bd-finish">
+      <h2>🎉 Схема собрана!</h2>
+      <p>Найдены все связи из параграфа: ${total}. С первой попытки — <strong>${first} из ${total}</strong>.</p>
+      <p class="muted">Теперь проверь, как схема работает: поменяй один фактор и посмотри, что изменится по цепочке.</p>
+      <div class="row"><a class="btn primary" href="#/explore/${esc(g.id)}">Что будет, если… →</a><button class="btn" data-action="bd-restart">Собрать заново</button></div>
+    </div>
+    <h2 class="bd-h">Твоя схема</h2>
+    <div class="graph-wrap" id="graph"></div>`;
+    renderGraph(document.getElementById('graph'), partial);
+    return;
+  }
+
+  const edge = g.edges[b.step];
+  const nodes = seededShuffle(g.nodes, g.id);
+  const p = b.pick;
+  const chips = (field, exclude) => nodes.map((n) => {
+    const on = p[field] === n.id;
+    const off = n.id === exclude || b.solved;
+    return `<button type="button" class="chip bd-chip${on ? ' on' : ''}" data-action="bd-pick" data-f="${field}" data-id="${esc(n.id)}" aria-pressed="${on}" ${off ? 'disabled' : ''}>${esc(n.label)}</button>`;
+  }).join('');
+  const A = p.from ? `«${esc(nodeLabel(g, p.from))}»` : '<span class="bd-blank">причина</span>';
+  const B = p.to ? `«${esc(nodeLabel(g, p.to))}»` : '<span class="bd-blank">следствие</span>';
+  const signBtn = (s, word) => `<button type="button" class="bd-sign${p.sign === s ? ' on' : ''}" data-action="bd-pick" data-f="sign" data-id="${s}" aria-pressed="${p.sign === s}" ${b.solved ? 'disabled' : ''}>
+      <span class="bd-sign-icon" aria-hidden="true">${s > 0 ? '▲ ▲' : '▲ ▼'}</span><span>Чем больше ${A}, тем <strong>${word}</strong> ${B}</span></button>`;
+  const ready = p.from && p.to && p.sign;
+  const inText = text.toLowerCase().includes((edge.evidence || '').toLowerCase()) && edge.evidence;
+
   app.innerHTML = `
   <a class="back" href="#/build">← Все схемы</a>
-  <h1>Собери сам: ${esc(g.title)}</h1>
-  <div class="paragraph">${esc(textOf(g))}</div>
-  <div class="toolbar">
-    <span>Связь:</span>
-    <div class="seg"><button class="${b.sign > 0 ? 'on' : ''}" data-action="bd-sign" data-s="1">+ усиливает</button><button class="${b.sign < 0 ? 'on' : ''}" data-action="bd-sign" data-s="-1">− ослабляет</button></div>
-    <span class="muted small">${b.from ? `Теперь нажми, на что влияет «${esc(nodeLabel(g, b.from))}»` : 'Нажми на причину, затем на следствие. Нажми на стрелку, чтобы удалить её.'}</span>
-  </div>
-  <div class="graph-wrap" id="graph"></div>
-  <div class="row">
-    <button class="btn primary" data-action="bd-check" ${b.edges.length ? '' : 'disabled'}>Проверить</button>
-    <button class="btn" data-action="bd-hint">Подсказка</button>
-    <button class="btn" data-action="bd-ref">${b.showRef ? 'Скрыть эталон' : 'Показать эталон'}</button>
-    <button class="btn ghost" data-action="bd-clear">Очистить</button>
-  </div>
-  ${b.hint ? `<div class="info">${b.hint}</div>` : ''}
-  ${b.result ? (() => {
-    const r = b.result;
-    return `<div class="step"><h3>Совпало ${r.correct.length} из ${g.edges.length} связей (${Math.round(r.score * 100)}%)</h3>
-      ${r.wrongSign.length ? `<p>Связь есть, но знак другой: ${r.wrongSign.map((e) => `${esc(nodeLabel(g, e.from))} → ${esc(nodeLabel(g, e.to))}`).join('; ')}. Перечитай: усиливает или ослабляет?</p>` : ''}
-      ${r.extra.length ? `<p>Этих связей нет в эталоне: ${r.extra.map((e) => `${esc(nodeLabel(g, e.from))} → ${esc(nodeLabel(g, e.to))}`).join('; ')}. Найди в тексте подтверждение — или убери. Иногда ученик прав, а схема неполная: скажи учителю!</p>` : ''}
-      ${r.missing.length ? `<p>Не хватает ещё ${r.missing.length} связей. Нажми «Подсказка».</p>` : '<p>Все связи из параграфа найдены! 🎉</p>'}</div>`;
-  })() : ''}`;
-  renderGraph(document.getElementById('graph'), g, {
-    edges: b.showRef ? g.edges : b.edges,
-    pending: b.from,
-    onNodeClick: (nid) => {
-      if (b.showRef) return;
-      if (!b.from) b.from = nid;
-      else if (b.from === nid) b.from = null;
-      else {
-        b.edges = b.edges.filter((e) => !(e.from === b.from && e.to === nid));
-        b.edges.push({ from: b.from, to: nid, sign: b.sign, strength: 2, delay: 0 });
-        b.from = null;
-        b.result = null;
-        store.set(`draft-${id}`, b.edges);
-      }
-      viewBuild(id);
-    },
-    onEdgeClick: (e) => {
-      if (b.showRef) return;
-      b.edges = b.edges.filter((x) => x !== e);
-      b.result = null;
-      store.set(`draft-${id}`, b.edges);
-      viewBuild(id);
-    },
-  });
+  <div class="ex-head"><h1>Собери сам: ${esc(g.title)}</h1><span class="badge">Связь ${b.step + 1} из ${total}</span></div>
+  ${progress}
+  <details class="bd-text" ${inText ? 'open' : ''}><summary>Параграф целиком</summary><div class="paragraph">${markEvidence(text, edge.evidence)}</div></details>
+
+  <section class="step bd-card" aria-labelledby="bd-q">
+    <p class="muted small" id="bd-q">Прочитай фразу из текста:</p>
+    <blockquote class="bd-quote">${edge.evidence ? `«${esc(edge.evidence)}»` : `Найди в параграфе, как связаны «${esc(nodeLabel(g, edge.from))}» и «${esc(nodeLabel(g, edge.to))}».`}</blockquote>
+
+    <h3><span class="n">1</span> Что здесь <u>причина</u> — что меняется сначала?</h3>
+    <div class="bd-chips" role="group" aria-label="Причина">${chips('from', p.to)}</div>
+
+    <h3><span class="n">2</span> А что от этого <u>меняется</u> — следствие?</h3>
+    <div class="bd-chips" role="group" aria-label="Следствие">${chips('to', p.from)}</div>
+
+    <h3><span class="n">3</span> Как они связаны?</h3>
+    <div class="bd-signs" role="group" aria-label="Как связаны">${signBtn(1, 'больше')}${signBtn(-1, 'меньше')}</div>
+
+    <div id="bd-feedback" role="status" aria-live="polite">${b.feedback}</div>
+    <div class="row">
+      ${b.solved
+        ? `<button class="btn primary" data-action="bd-next">${b.step + 1 < total ? 'Дальше →' : 'Готово →'}</button>`
+        : `<button class="btn primary" data-action="bd-check" ${ready ? '' : 'disabled'}>Проверить</button>
+           ${b.tries >= 2 ? '<button class="btn" data-action="bd-reveal">Показать ответ</button>' : ''}`}
+    </div>
+  </section>
+
+  <h2 class="bd-h">Твоя схема ${b.done.length ? `<span class="muted small">· ${b.done.length} из ${total}</span>` : ''}</h2>
+  ${b.done.length ? '<div class="graph-wrap" id="graph"></div>' : '<p class="muted">Пока пусто. Каждая найденная связь появится здесь стрелкой.</p>'}
+  ${b.done.length || b.step ? '<p><button class="btn ghost" data-action="bd-restart">Начать сначала</button></p>' : ''}`;
+  if (b.done.length) renderGraph(document.getElementById('graph'), partial);
+}
+
+function buildCheck() {
+  const b = S.bd;
+  const g = graphById(b.graphId);
+  const edge = g.edges[b.step];
+  const p = b.pick;
+  if (p.from === edge.from && p.to === edge.to && p.sign === edge.sign) {
+    b.solved = true;
+    b.done.push({ i: b.step, first: b.tries === 0 && !b.revealed });
+    b.feedback = `<div class="info good">✓ Верно! ${b.tries === 0 ? 'С первой попытки. ' : ''}Связь «${esc(nodeLabel(g, edge.from))}» ${edge.sign > 0 ? '▲→▲' : '▲→▼'} «${esc(nodeLabel(g, edge.to))}» добавлена в схему.</div>`;
+    saveBuild(b);
+  } else {
+    b.tries += 1;
+    b.feedback = `<div class="info bad">${buildFeedback(g, edge, p)}${b.tries >= 2 ? ' <br><span class="small">Если не получается — можно посмотреть ответ.</span>' : ''}</div>`;
+  }
+  viewBuild(b.graphId);
+  document.getElementById('bd-feedback')?.scrollIntoView({ block: 'nearest', behavior: reduceMotion() ? 'auto' : 'smooth' });
 }
 
 // ---------- кабинет учителя ----------
@@ -816,16 +909,32 @@ const actions = {
   'close-info': () => { S.ex.info = null; S.ex.highlight = null; drawExploreGraph(); drawPanel(); },
   debrief: debriefWithSova,
   reset: () => { const id = S.ex.graphId; S.ex = null; viewExplore(id); },
-  'bd-sign': (d) => { S.bd.sign = Number(d.s); viewBuild(S.bd.graphId); },
-  'bd-check': () => { const g = graphById(S.bd.graphId); S.bd.result = compareGraphs(g, S.bd.edges); S.bd.hint = ''; viewBuild(S.bd.graphId); },
-  'bd-hint': () => {
-    const g = graphById(S.bd.graphId);
-    const miss = compareGraphs(g, S.bd.edges).missing;
-    S.bd.hint = miss.length ? `В тексте сказано: <blockquote>«${esc(miss[0].evidence)}»</blockquote> Какие два фактора связывает эта фраза? Усиливает связь или ослабляет?` : 'Все связи уже найдены!';
-    viewBuild(S.bd.graphId);
+  'bd-pick': (d) => {
+    const b = S.bd;
+    const v = d.f === 'sign' ? Number(d.id) : d.id;
+    b.pick[d.f] = b.pick[d.f] === v ? (d.f === 'sign' ? 0 : null) : v;
+    b.feedback = '';
+    viewBuild(b.graphId);
   },
-  'bd-ref': () => { S.bd.showRef = !S.bd.showRef; viewBuild(S.bd.graphId); },
-  'bd-clear': () => { S.bd.edges = []; S.bd.result = null; S.bd.hint = ''; store.set(`draft-${S.bd.graphId}`, []); viewBuild(S.bd.graphId); },
+  'bd-check': buildCheck,
+  'bd-reveal': () => {
+    const b = S.bd;
+    const g = graphById(b.graphId);
+    const e = g.edges[b.step];
+    b.pick = { from: e.from, to: e.to, sign: e.sign };
+    b.revealed = true;
+    buildCheck();
+    b.feedback = `<div class="info">Ответ: <strong>чем больше «${esc(nodeLabel(g, e.from))}», тем ${e.sign > 0 ? 'больше' : 'меньше'} «${esc(nodeLabel(g, e.to))}»</strong>. Найди эти слова в подсвеченной фразе — так проще запомнить.</div>`;
+    viewBuild(b.graphId);
+  },
+  'bd-next': () => {
+    const b = S.bd;
+    Object.assign(b, { step: b.step + 1, pick: { from: null, to: null, sign: 0 }, tries: 0, feedback: '', solved: false, revealed: false });
+    saveBuild(b);
+    viewBuild(b.graphId);
+    window.scrollTo({ top: 0, behavior: reduceMotion() ? 'auto' : 'smooth' });
+  },
+  'bd-restart': () => { const g = graphById(S.bd.graphId); store.set(`build-${g.id}`, null); S.bd = buildState(g); viewBuild(g.id); },
   'sample-text': () => { S.teacher.text = 'Вырубка лесов уменьшает количество деревьев, которые поглощают углекислый газ. Поэтому в атмосфере накапливается больше углекислого газа, и парниковый эффект усиливается. Без корней деревьев почва хуже удерживается, и дожди смывают плодородный слой. Из-за эрозии почвы снижаются урожаи. Кроме того, исчезают места обитания животных, и сокращается число видов.'; viewTeacher(); },
   't-sign': (d) => { const e = S.teacher.graph.edges[Number(d.i)]; e.sign = -e.sign; viewTeacher(); },
   't-del': (d) => { S.teacher.graph.edges.splice(Number(d.i), 1); viewTeacher(); },

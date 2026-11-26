@@ -129,3 +129,13 @@ test('PIN учителя: хэш в браузере совпадает с се�
   assert.equal(await hashPin('2026'), PIN_HASH);
   assert.notEqual(await hashPin('2025'), PIN_HASH);
 });
+
+test('«Собери сам»: у каждой связи есть цитата, и она дословно есть в параграфе', () => {
+  const texts = {};
+  for (const s of load('../web/data/library/index.json')) for (const d of load(`../web/data/library/${s.id}.json`)) texts[d.id] = d.text;
+  for (const g of graphs) {
+    const text = (g.sourceText || texts[g.text] || '').toLowerCase();
+    assert.ok(text, `${g.id}: нет параграфа`);
+    for (const e of g.edges) assert.ok(e.evidence && text.includes(e.evidence.toLowerCase()), `${g.id}: ${e.from}→${e.to} — цитаты нет в тексте`);
+  }
+});

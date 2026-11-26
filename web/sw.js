@@ -1,6 +1,6 @@
 // Офлайн-режим: после первого открытия сайт целиком хранится на устройстве
 // и работает без интернета. Список файлов проверяется тестом (tests/engine.test.mjs).
-const VERSION = 'znanie-v2';
+const VERSION = 'znanie-v3';
 const FILES = [
   './',
   'data/graphs/aral.json',
