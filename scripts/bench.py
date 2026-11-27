@@ -16,6 +16,7 @@ from __future__ import annotations
 import argparse
 import csv
 import json
+import os
 import statistics
 import sys
 import time
@@ -26,7 +27,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "server"))
 from server import GENERAL, LIB, tutor_messages  # noqa: E402
 
 # 127.0.0.1, а не localhost: в Windows localhost сначала пробует IPv6 и теряет ~2 с на каждом запросе.
-OLLAMA = "http://127.0.0.1:11434"
+OLLAMA = os.environ.get("ZNANIE_LLM_URL", "http://127.0.0.1:11434").rstrip("/")
 QUESTIONS = [
     ("библиотека", "Почему высохло Аральское море?"),
     ("библиотека", "Что такое закон Ома?"),

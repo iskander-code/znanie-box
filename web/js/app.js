@@ -1,10 +1,11 @@
 import { simulate, pathTo, findLoops, checkPredictions, trend, DEFAULT_DELAY_LABELS } from './engine.js';
 import { renderGraph, esc } from './graph-view.js';
 import { Library, localAnswer, makeQuiz, checkQuiz, RELEVANT } from './tutor-local.js';
-import { detectBrowserLLM, warmUpBrowserLLM, chatBrowser, chatBrowserStream, readNDJSON, tutorMessages, generalMessages, DEBRIEF } from './llm-browser.js';
+import { detectBrowserLLM, warmUpBrowserLLM, chatBrowserStream, readNDJSON, tutorMessages, generalMessages, cleanAnswer, DEBRIEF, TEACHER_AI } from './llm-browser.js';
 import { themeSwitcher, applyTheme, setTheme, currentTheme, reduceMotion, speak } from './a11y.js';
 import { login, getToken, setToken, recordLocal, localSummary, resetLocalStats, localExam, setLocalExam } from './teacher.js';
 import { qrSVG } from './qr.js';
+import { PROVIDERS as ONLINE, keyOf, setKey, onlineProvider, setOnlineProvider, onlineLabel, onlineStatus, streamOnline, testKey, describe as describeOnline, Refused } from './online-browser.js';
 
 const app = document.getElementById('app');
 const S = {
@@ -17,6 +18,7 @@ const S = {
   ex: null,
   bd: null,
   teacher: { text: '', graph: null, notes: [], busy: false, error: '', pinError: '', summary: null },
+  ai: { messages: [], busy: false }, // ИИ-помощник учителя
   exam: false, // режим контрольной: Сова не выдаёт готовых ответов
   auth: getToken(), // токен учителя (до закрытия вкладки)
 };
@@ -96,6 +98,7 @@ function logoutTeacher() {
 
 function renderStatus() {
   const el = document.getElementById('status');
+  if (!S.server && onlineLabel()) { el.textContent = `Нейросеть ${onlineLabel()}`; el.className = 'status on'; return; }
   if (!S.server && S.browserLLM) { el.textContent = `Нейросеть ${S.browserLLM} на этом компьютере`; el.className = 'status on'; return; }
   if (!S.server) { el.innerHTML = 'Без нейросети · <a href="#/ai">как включить</a>'; el.className = 'status demo'; return; }
   el.textContent = S.server.llm ? `Коробка · нейросеть ${S.server.model}` : 'Коробка · нейросеть не запущена';
@@ -124,7 +127,7 @@ function viewHome() {
   app.innerHTML = `
   <section class="hero">
     <h1>Библиотека, наставник и тренажёр мышления для школ Казахстана — без интернета</h1>
-    <p>Открой один раз — и всё работает без интернета: 400 тем, схемы и наставник сохраняются прямо на устройстве. Сова помогает дойти до ответа самому и показывает, откуда взята информация. Если в библиотеке ответа нет, Сова спросит нейросеть.</p>
+    <p>Открой один раз — и всё работает без интернета: ${S.texts.length} тем, схемы и наставник сохраняются прямо на устройстве. Сова помогает дойти до ответа самому и показывает, откуда взята информация. Если в библиотеке ответа нет, Сова спросит нейросеть.</p>
   </section>
   <div class="cards subjects">${S.subjects.map((s) => `<a class="card" href="#/library/${s.id}"><span class="icon">${s.icon}</span><strong>${esc(s.name)}</strong><span class="muted">${S.texts.filter((t) => t.subjectId === s.id).length} тем</span></a>`).join('')}</div>
   <div class="cards big">
@@ -132,7 +135,7 @@ function viewHome() {
     <a class="card" href="#/explore"><span class="icon">🔀</span><strong>Что будет, если…</strong><span class="muted">Измени одно условие в параграфе и проследи цепочку последствий</span></a>
     <a class="card" href="#/build"><span class="icon">🧩</span><strong>Собери сам</strong><span class="muted">Разбери параграф по фразам и собери схему причин и следствий</span></a>
     <a class="card" href="#/labs"><span class="icon">🧪</span><strong>Опыты</strong><span class="muted">${S.labs.length} интерактивных лабораторий PhET по физике и математике: меняй условия и смотри, что выйдет</span></a>
-    <a class="card" href="#/library"><span class="icon">📚</span><strong>Библиотека</strong><span class="muted">${S.texts.length} тем по истории Казахстана, физике, алгебре и геометрии</span></a>
+    <a class="card" href="#/library"><span class="icon">📚</span><strong>Библиотека</strong><span class="muted">${S.texts.length} тем: история Казахстана, физика, алгебра, геометрия, биология, химия, география</span></a>
     <a class="card" href="#/connect"><span class="icon">📱</span><strong>Как подключить Коробку</strong><span class="muted">4 простых шага и QR-код для телефонов класса</span></a>
   </div>
   <h2>Схемы «Что будет, если…»</h2>
@@ -142,10 +145,10 @@ function viewHome() {
 
 // ---------- как включить нейросеть ----------
 function viewAI() {
-  const on = S.server?.llm || S.browserLLM;
+  const on = S.server?.llm || browserAI();
   app.innerHTML = `
   <h1>Как включить нейросеть</h1>
-  ${on ? `<div class="info">✓ Нейросеть уже работает: ${esc(S.server?.model || S.browserLLM)}. <a href="#/sova">Спросить Сову</a></div>` : ''}
+  ${on ? `<div class="info">✓ Нейросеть уже работает: ${esc(S.server?.model || browserAI())}. <a href="#/sova">Спросить Сову</a></div>` : ''}
   <p class="muted">Нейросеть работает на вашем компьютере через бесплатную программу Ollama — без интернета и без отправки вопросов наружу. Установите Ollama с ollama.com и скачайте модель командой <code>ollama pull qwen2.5:3b</code>.</p>
   <div class="step"><h3><span class="n">1</span> Способ «коробка» — надёжный</h3>
     <p>Скачайте проект с GitHub (зелёная кнопка Code → Download ZIP), распакуйте и дважды нажмите <strong>Запустить.bat</strong>. Откроется браузер с прототипом, нейросеть подключится сама. Нужен Python 3.10+.</p>
@@ -250,28 +253,53 @@ function renderMsg(m, i) {
   return `<div class="msg ${m.role}">${say}${esc(m.text).replace(/\n/g, '<br>')}${sources || graph ? `<div class="row">${sources}${graph}</div>` : ''}${by}</div>`;
 }
 
+// ---------- нейросеть на сайте без коробки: онлайн по ключу из этого браузера или Ollama на компьютере ----------
+/** Название нейросети, которая сейчас ответит без коробки, или null. */
+const browserAI = () => onlineLabel() || S.browserLLM;
+
+/**
+ * Ответ без коробки по мере печати. Онлайн-нейросеть недоступна до первого слова — отвечает Ollama
+ * на этом компьютере с пометкой. Отказ онлайн-модели по правилам безопасности не обходится.
+ */
+async function browserAsk(messages, onDelta, maxTokens) {
+  const pid = onlineProvider();
+  if (pid) {
+    let started = false;
+    try {
+      return cleanAnswer(await streamOnline(pid, messages, (piece) => { started = true; onDelta(piece); }));
+    } catch (e) {
+      if (e instanceof Refused) return 'Я не могу ответить на этот вопрос. Спроси учителя или родителей.';
+      if (started || !S.browserLLM) throw new Error(`${ONLINE[pid].name}: ${describeOnline(e)}`);
+    }
+    const text = await chatBrowserStream(S.browserLLM, messages, onDelta, maxTokens);
+    return `${text}\n\n(Онлайн-нейросеть недоступна — ответила локальная модель.)`;
+  }
+  return chatBrowserStream(S.browserLLM, messages, onDelta, maxTokens);
+}
+
 // Предел длины ответа (как на коробке): подсказка короткая, объяснение длиннее.
 const MAX_TOKENS = { hint: 160, answer: 350, general: 350 };
 
 /** Ответ печатается в пузыре «Сова думает…» по мере готовности — не чаще раза в 60 мс (бережём слабые устройства). */
-function liveBubble() {
+function liveBubble(boxId = 'messages') {
   let text = '';
   let raf = 0;
   const paint = () => {
     raf = 0;
-    const el = document.querySelector('#messages .typing');
+    const el = document.querySelector(`#${boxId} .typing`);
     if (!el) return;
     el.classList.add('live');
     el.textContent = text;
-    const box = document.getElementById('messages');
+    const box = document.getElementById(boxId);
     box.scrollTop = box.scrollHeight;
   };
   return (piece) => { text += piece; if (!raf) raf = setTimeout(paint, 60); };
 }
 
 /** Вопрос коробке с ответом по мере печати. Старый сервер или ответ без нейросети приходит обычным JSON. */
-async function chatServer(body, onDelta) {
-  const r = await fetch('api/chat', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ ...body, stream: true }) });
+async function chatServer(body, onDelta, url = 'api/chat', headers = {}) {
+  const r = await fetch(url, { method: 'POST', headers: { 'Content-Type': 'application/json', ...headers }, body: JSON.stringify({ ...body, stream: true }) });
+  if (r.status === 403 && headers['X-Teacher-Token']) { logoutTeacher(); throw new Error('Вход учителя истёк — введите PIN ещё раз'); }
   if (!r.ok) throw new Error((await r.json().catch(() => ({}))).error || `Ошибка ${r.status}`);
   if (!r.headers.get('content-type')?.includes('ndjson') || !r.body) return r.json();
   let meta = {};
@@ -311,22 +339,22 @@ async function askSova(question, level, mode = S.chat.mode) {
       }
     } else if (S.exam && !RELEVANT(S.lib.search(question))) {
       reply = { text: EXAM_GENERAL, sources: [], graph: null, by: 'режим контрольной', general: true };
-    } else if (S.browserLLM && RELEVANT(S.lib.search(question))) {
+    } else if (browserAI() && RELEVANT(S.lib.search(question))) {
       const fragments = S.lib.search(question);
       const history = c.messages.slice(-7, -1).map((m) => ({ role: m.role, content: m.text }));
       const hint = mode === 'socratic' && level < 2;
-      const text = await chatBrowserStream(S.browserLLM, tutorMessages({ message: question, mode, level, grade: c.grade, history, fragments: fragments.slice(0, 3) }), liveBubble(), MAX_TOKENS[hint ? 'hint' : 'answer']);
+      const text = await browserAsk(tutorMessages({ message: question, mode, level, grade: c.grade, history, fragments: fragments.slice(0, 3) }), liveBubble(), MAX_TOKENS[hint ? 'hint' : 'answer']);
       if (mode === 'socratic' && level < 2 && !text.includes('?')) {
         // Модель выдала ответ вместо наводящего вопроса — показываем проверенную подсказку-шаблон.
         reply = { ...localAnswer({ message: question, mode, level, fragments }), by: 'подсказка-шаблон' };
       } else {
-        reply = { text, sources: [...new Map(fragments.slice(0, 2).map((x) => [x.title, x])).values()], graph: fragments.find((x) => x.graph)?.graph || null, by: `нейросеть ${S.browserLLM}` };
+        reply = { text, sources: [...new Map(fragments.slice(0, 2).map((x) => [x.title, x])).values()], graph: fragments.find((x) => x.graph)?.graph || null, by: `нейросеть ${browserAI()}` };
       }
-    } else if (S.browserLLM) {
+    } else if (browserAI()) {
       // В библиотеке ничего нет — отвечает нейросеть из своих знаний, с пометкой.
       const history = c.messages.slice(-7, -1).map((m) => ({ role: m.role, content: m.text }));
-      const text = await chatBrowserStream(S.browserLLM, generalMessages({ message: question, grade: c.grade, history }), liveBubble(), MAX_TOKENS.general);
-      reply = { text, sources: [], graph: null, by: GENERAL_LABEL(S.browserLLM), general: true };
+      const text = await browserAsk(generalMessages({ message: question, grade: c.grade, history }), liveBubble(), MAX_TOKENS.general);
+      reply = { text, sources: [], graph: null, by: GENERAL_LABEL(browserAI()), general: true };
     } else {
       reply = { ...localAnswer({ message: question, mode, level, fragments: S.lib.search(question) }), by: 'без нейросети' };
     }
@@ -467,7 +495,7 @@ function drawPanel() {
     if (loops.length) h += `<div class="step"><h3>Петли обратной связи</h3><ul class="list">${loops.map((l) => `<li><strong>${l.type === 'reinforcing' ? 'Усиливающая' : 'Стабилизирующая'}:</strong> ${l.nodes.map((n) => esc(nodeLabel(g, n))).join(' → ')} → ${esc(nodeLabel(g, l.nodes[0]))}</li>`).join('')}</ul></div>`;
     h += `<div class="step"><h3>🦉 Разбор с Совой</h3><p>${esc(localDebrief(g, r, checks)).replace(/\n/g, '<br>')}</p>
       ${x.debrief ? `<div class="msg assistant">${esc(x.debrief).replace(/\n/g, '<br>')}<span class="by">нейросеть</span></div>` : ''}
-      ${(S.server?.llm || S.browserLLM) && !x.debrief ? `<button class="btn" data-action="debrief" ${x.busy ? 'disabled' : ''}>${x.busy ? 'Сова думает…' : 'Обсудить с Совой подробнее'}</button>` : ''}
+      ${(S.server?.llm || browserAI()) && !x.debrief ? `<button class="btn" data-action="debrief" ${x.busy ? 'disabled' : ''}>${x.busy ? 'Сова думает…' : 'Обсудить с Совой подробнее'}</button>` : ''}
       ${g.questions?.length ? `<p class="question"><strong>Подумай:</strong> ${esc(g.questions[0])}</p>` : ''}</div>
       <button class="btn wide" data-action="reset">↺ Попробовать другое условие</button>`;
   }
@@ -575,7 +603,7 @@ async function debriefWithSova() {
       const res = await postJSON('api/chat', { mode: 'debrief', context });
       x.debrief = res.answer || 'Нейросеть сейчас недоступна.';
     } else {
-      x.debrief = await chatBrowser(S.browserLLM, [{ role: 'system', content: DEBRIEF }, { role: 'user', content: JSON.stringify(context) }], 400);
+      x.debrief = await browserAsk([{ role: 'system', content: DEBRIEF }, { role: 'user', content: JSON.stringify(context) }], () => {}, 400);
     }
   } catch (e) {
     x.debrief = `Не получилось: ${e.message}`;
@@ -865,6 +893,8 @@ function viewTeacher() {
     ${reports.length ? `<details><summary>Жалобы «Тут ошибка» на этом устройстве: ${reports.length}</summary><ul class="list">${reports.slice(-20).reverse().map((r) => `<li><strong>${esc(r.q || '')}</strong><br><span class="muted small">${esc((r.a || '').slice(0, 200))}</span></li>`).join('')}</ul></details>` : ''}
   </section>
 
+  ${teacherAISection()}
+
   <section class="step">
     <h3>🔀 Редактор схем</h3>
     <p class="muted">Вставьте параграф — нейросеть предложит схему причин и следствий. Каждая связь подтверждается цитатой; связи без цитаты убираются автоматически. Проверьте схему и одобрите — тогда она появится у учеников.</p>
@@ -965,7 +995,7 @@ function viewConnect() {
     </svg>
   </figure>
   <div class="cards analogies">
-    <div class="card"><span class="icon">📚</span><strong>Библиотека = книжный шкаф</strong><span class="muted">400 тем по истории Казахстана, физике, алгебре и геометрии лежат внутри Коробки.</span></div>
+    <div class="card"><span class="icon">📚</span><strong>Библиотека = книжный шкаф</strong><span class="muted">${S.texts.length} тем по 7 предметам лежат внутри Коробки.</span></div>
     <div class="card"><span class="icon">🦉</span><strong>Сова = умный помощник</strong><span class="muted">Читает только книги из шкафа и не выдумывает. Если ответа там нет — так и говорит, а ответ нейросети помечает знаком ⚠.</span></div>
     <div class="card"><span class="icon">🔀</span><strong>Симулятор = конструктор последствий</strong><span class="muted">Меняешь одно условие — и видишь, что произойдёт дальше по цепочке.</span></div>
     <div class="card"><span class="icon">🚫</span><strong>Интернет = не нужен</strong><span class="muted">Всё уже внутри. Вопросы учеников никуда не уходят.</span></div>
@@ -1047,6 +1077,10 @@ const actions = {
   'close-info': () => { S.ex.info = null; S.ex.highlight = null; drawExploreGraph(); drawPanel(); },
   debrief: debriefWithSova,
   reset: () => { const id = S.ex.graphId; S.ex = null; viewExplore(id); },
+  'key-test': (d) => checkKey(d.p),
+  'key-remove': (d) => saveKey(d.p, ''),
+  'ai-example': (d) => askTeacherAI(d.q),
+  'ai-clear': () => { S.ai.messages = []; viewTeacher(); },
   'lab-filter': (d) => { S.labFilter = d.f; viewLabs(); },
   'lab-full': () => { const f = document.getElementById('lab-frame'); (f.requestFullscreen || f.webkitRequestFullscreen)?.call(f); },
   'labs-save': (d, el) => saveAllLabs(el),
@@ -1116,30 +1150,147 @@ function showTTSNote(msg) {
   el.hidden = !msg;
 }
 
+// ---------- ИИ-помощник учителя ----------
+const TEACHER_AI_EXAMPLES = [
+  'Составь план урока на 45 минут по закону Ома для 8 класса',
+  'Придумай 5 задач на дискриминант с ответами',
+  'Как объяснить фотосинтез ученикам 6 класса на примере огорода?',
+  'Напиши 10 вопросов для проверки по теме «Казахское ханство»',
+];
+
+function teacherAISection() {
+  const a = S.ai;
+  const ready = S.server ? S.server.llm : !!browserAI();
+  const who = S.server ? (S.server.model || 'нейросеть') : browserAI();
+  return `<section class="step">
+    <h3>🤖 ИИ-помощник учителя</h3>
+    <p class="muted small">Отвечает на любые вопросы из своих знаний, а не из библиотеки сайта: план урока, задачи с ответами, как объяснить тему, проверочные вопросы. ${ready ? `Сейчас отвечает: <strong>${esc(who)}</strong>.` : ''} Нейросеть может ошибаться — проверяйте факты по учебнику.</p>
+    ${ready ? '' : `<div class="info">${S.server ? 'Нейросеть не запущена: запустите Ollama или задайте ключ онлайн-нейросети (раздел «Какая нейросеть отвечает»).' : 'Нейросеть не найдена: запустите коробку или включите Ollama на этом компьютере (<a href="#/ai">как включить</a>).'}</div>`}
+    <div class="messages ai-messages" id="ai-messages" aria-live="polite">
+      ${a.messages.length ? a.messages.map((m) => `<div class="msg ${m.role}">${esc(m.text).replace(/\n/g, '<br>')}${m.by ? `<span class="by">${esc(m.by)}</span>` : ''}</div>`).join('')
+        : `<div class="row">${TEACHER_AI_EXAMPLES.map((q) => `<button class="chip" type="button" data-action="ai-example" data-q="${esc(q)}" ${ready ? '' : 'disabled'}>${esc(q)}</button>`).join('')}</div>`}
+      ${a.busy ? '<div class="msg assistant typing">Думаю…</div>' : ''}
+    </div>
+    <form class="composer" data-form="teacher-ai">
+      <textarea name="q" rows="2" placeholder="Спросите что угодно…" aria-label="Вопрос ИИ-помощнику" ${ready ? '' : 'disabled'}></textarea>
+      <button class="btn primary" ${a.busy || !ready ? 'disabled' : ''}>Спросить</button>
+    </form>
+    ${a.messages.length && !a.busy ? '<p><button class="btn ghost" type="button" data-action="ai-clear">Начать новый разговор</button></p>' : ''}
+  </section>`;
+}
+
+async function askTeacherAI(question) {
+  const a = S.ai;
+  if (!question.trim() || a.busy) return;
+  const history = a.messages.slice(-8).map((m) => ({ role: m.role, content: m.text }));
+  a.messages.push({ role: 'user', text: question });
+  a.busy = true;
+  viewTeacher();
+  let reply;
+  try {
+    if (S.server) {
+      const r = await chatServer({ message: question, history }, liveBubble('ai-messages'), 'api/teacher/ask', { 'X-Teacher-Token': S.auth || '' });
+      reply = { text: r.answer || r.error || 'Нейросеть не ответила.', by: r.answer ? `нейросеть ${r.model}` : '' };
+    } else if (browserAI()) {
+      const who = browserAI();
+      const text = await browserAsk([{ role: 'system', content: TEACHER_AI }, ...history, { role: 'user', content: question }], liveBubble('ai-messages'), 1500);
+      reply = { text, by: `нейросеть ${who}` };
+    } else {
+      reply = { text: 'Нейросеть не найдена: запустите коробку или включите Ollama на этом компьютере.', by: '' };
+    }
+  } catch (e) {
+    reply = { text: `Не получилось ответить: ${e.message}`, by: '' };
+  }
+  a.messages.push({ role: 'assistant', ...reply });
+  a.busy = false;
+  if (location.hash.startsWith('#/teacher') && isTeacher()) {
+    viewTeacher();
+    const box = document.getElementById('ai-messages');
+    if (box) box.scrollTop = box.scrollHeight;
+  }
+}
+
 async function setProvider(pid) {
   try {
-    const r = await teacherPost('api/settings', { provider: pid });
-    Object.assign(S.server, { provider: r.provider, model: r.model, providers: r.providers, llm: true });
+    if (S.server) {
+      const r = await teacherPost('api/settings', { provider: pid });
+      Object.assign(S.server, r);
+    } else {
+      setOnlineProvider(pid);
+    }
     S.teacher.providerError = '';
   } catch (e) { S.teacher.providerError = e.message; }
   renderStatus();
   viewTeacher();
 }
 
-/** Выбор нейросети: локальная Qwen всегда есть, онлайн — только с ключом на коробке. */
+async function saveKey(pid, key) {
+  const k = (S.teacher.keyTest ||= {});
+  delete k[pid];
+  try {
+    if (S.server) Object.assign(S.server, await teacherPost('api/teacher/keys', { provider: pid, key }));
+    else setKey(pid, key);
+    S.teacher.providerError = '';
+    if (key) await checkKey(pid, false);
+  } catch (e) { S.teacher.providerError = e.message; }
+  renderStatus();
+  viewTeacher();
+}
+
+async function checkKey(pid, redraw = true) {
+  const k = (S.teacher.keyTest ||= {});
+  k[pid] = { busy: true };
+  if (redraw) viewTeacher();
+  try {
+    if (S.server) {
+      const r = await teacherPost('api/teacher/test-key', { provider: pid });
+      k[pid] = r.ok ? { ok: true, text: `✓ Ключ работает. Ответ: «${r.reply}»` } : { ok: false, text: `✗ ${r.error}` };
+    } else {
+      const reply = await testKey(pid);
+      k[pid] = { ok: true, text: `✓ Ключ работает. Ответ: «${reply.trim().slice(0, 40)}»` };
+    }
+  } catch (e) {
+    k[pid] = e instanceof Refused ? { ok: true, text: '✓ Ключ работает.' } : { ok: false, text: `✗ ${S.server ? e.message : describeOnline(e)}` };
+  }
+  if (redraw) viewTeacher();
+}
+
+/** Выбор нейросети и ключи онлайн-нейросетей: с коробкой — на сервере, без неё — в этом браузере. */
 function providerSection() {
-  if (!S.server) return '';
-  const cur = S.server.provider || 'local';
-  const online = S.server.providers || [];
-  const local = S.server.localModel;
-  const opt = (id, title, note) => `<label class="radio"><input type="radio" name="provider" value="${esc(id)}" data-action-change="provider" ${cur === id ? 'checked' : ''}><span><strong>${esc(title)}</strong><br><span class="muted small">${note}</span></span></label>`;
+  const box = !!S.server;
+  const cur = box ? (S.server.provider || 'local') : (onlineProvider() || 'local');
+  const list = box ? (S.server.online || []) : onlineStatus();
+  const local = box ? S.server.localModel : S.browserLLM;
+  const tests = S.teacher.keyTest || {};
+  const radio = (id, enabled) => `<input type="radio" name="provider" value="${esc(id)}" data-action-change="provider" ${cur === id ? 'checked' : ''} ${enabled ? '' : 'disabled'} aria-label="Выбрать">`;
+  const localNote = local
+    ? (box ? 'Вопросы не покидают коробку. Основной режим.' : 'Ollama на этом компьютере, без интернета.')
+    : (box ? 'Модель не запущена: Сова отвечает подсказками-шаблонами. Запустите Ollama.' : 'Ollama на этом компьютере не найдена: Сова отвечает подсказками-шаблонами.');
+  const card = (p) => {
+    const t = tests[p.id];
+    return `<div class="radio provider ${cur === p.id ? 'on' : ''}">
+      ${radio(p.id, p.hasKey)}
+      <div class="grow">
+        <strong>${esc(p.name)} · ${esc(p.model)} (онлайн)</strong>
+        ${p.hasKey
+          ? `<div class="row key-row"><span class="muted small">Ключ ${esc(p.masked)}${p.source === 'env' ? ' (из переменной окружения)' : box ? ' (сохранён на коробке)' : ' (сохранён в этом браузере)'}</span>
+             <button type="button" class="btn small" data-action="key-test" data-p="${esc(p.id)}" ${t?.busy ? 'disabled' : ''}>${t?.busy ? 'Проверяю…' : 'Проверить'}</button>
+             ${p.source !== 'env' ? `<button type="button" class="btn ghost small" data-action="key-remove" data-p="${esc(p.id)}">Удалить ключ</button>` : ''}</div>`
+          : `<form class="row key-row" data-form="key" data-p="${esc(p.id)}" autocomplete="off">
+             <input type="password" name="key" placeholder="Вставьте ключ ${esc(p.name)}" aria-label="Ключ ${esc(p.name)}" autocomplete="off" spellcheck="false" required>
+             <button class="btn small">Сохранить</button></form>`}
+        ${t && !t.busy ? `<div class="small ${t.ok ? 'ok' : 'bad'}" role="status">${esc(t.text)}</div>` : ''}
+      </div></div>`;
+  };
   return `<section class="step">
     <h3>🧠 Какая нейросеть отвечает</h3>
     <div class="radios" role="radiogroup" aria-label="Нейросеть">
-      ${opt('local', `Без интернета · ${local || 'локальная модель'}`, local ? 'Вопросы не покидают коробку. Основной режим.' : 'Модель не запущена: Сова отвечает подсказками-шаблонами. Запустите Ollama.')}
-      ${online.map((p) => opt(p.id, `${p.name} · ${p.model} (онлайн)`, '⚠ Нужен интернет. Вопросы учеников уходят в сервис компании-разработчика. Если интернет пропадёт, ответит модель без интернета.')).join('')}
+      <label class="radio ${cur === 'local' ? 'on' : ''}">${radio('local', true)}<span><strong>Без интернета · ${esc(local || 'локальная модель')}</strong><br><span class="muted small">${localNote}</span></span></label>
+      ${list.map(card).join('')}
     </div>
-    ${online.length ? '' : '<p class="muted small">Онлайн-нейросети появятся здесь, когда на коробке задан ключ: <code>ANTHROPIC_API_KEY</code> (Claude), <code>OPENAI_API_KEY</code> (GPT) или <code>GEMINI_API_KEY</code> (Gemini). Как задать — в README, раздел «Онлайн-режим».</p>'}
+    <p class="muted small">⚠ Онлайн-нейросети работают только с интернетом, и вопросы учеников уходят в сервис компании-разработчика. Если интернет пропадёт, ответит модель без интернета.
+    ${box ? 'Ключ хранится на коробке, в браузеры учеников он не попадает.' : 'Без коробки ключ хранится только в этом браузере: не сохраняйте его на общем компьютере класса.'}
+    Где взять ключ: Claude — console.anthropic.com, GPT — platform.openai.com, Gemini — aistudio.google.com.</p>
     ${S.teacher.providerError ? `<div class="info bad" role="alert">${esc(S.teacher.providerError)}</div>` : ''}
   </section>`;
 }
@@ -1166,6 +1317,8 @@ app.addEventListener('submit', (ev) => {
   ev.preventDefault();
   const form = ev.target;
   if (form.dataset.form === 'chat') { const v = form.q.value; form.q.value = ''; sendChat(v); }
+  if (form.dataset.form === 'key') { const v = form.key.value; form.key.value = ''; saveKey(form.dataset.p, v); }
+  if (form.dataset.form === 'teacher-ai') { const v = form.q.value; form.q.value = ''; askTeacherAI(v); }
   if (form.dataset.form === 'extract') extractGraph(form.text.value);
   if (form.dataset.form === 'pin') {
     const pin = form.pin.value;

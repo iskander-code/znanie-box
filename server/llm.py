@@ -52,7 +52,7 @@ def status() -> dict:
     m = model()
     pid = provider()
     return {"llm": available(), "model": label(), "localModel": m, "mode": "cloud" if API_KEY else "local", "device": device(),
-            "provider": pid, "providers": online.available()}
+            "provider": pid, "providers": online.available(), "online": online.status()}
 
 
 # Без видеокарты модель поменьше отвечает в 2–2,5 раза быстрее (замер: python scripts/bench.py --weak).

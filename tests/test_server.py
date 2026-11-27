@@ -33,7 +33,7 @@ class RagTest(unittest.TestCase):
         fr = self.lib.search("что такое закон Ома")
         self.assertTrue(is_relevant(fr))
         self.assertEqual(fr[0]["title"], "Закон Ома для участка цепи")
-        self.assertEqual(len(self.lib.docs), 400)
+        self.assertEqual(len(self.lib.docs), 700)
 
     def test_offtopic_is_not_relevant(self):
         for q in ("рецепт борща со сметаной", "Почему небо голубое?", "Сколько будет 2+2?"):
@@ -154,6 +154,19 @@ class ServerTest(unittest.TestCase):
         _, html = self.get("/")
         self.assertIn("Знание в коробке".encode(), html)
 
+    def test_static_files_are_gzipped(self):
+        import gzip
+        req = urllib.request.Request(self.base + "/data/library/biology.json?x=1", headers={"Accept-Encoding": "gzip"})
+        with urllib.request.urlopen(req, timeout=10) as r:
+            self.assertEqual(r.headers["Content-Encoding"], "gzip")
+            self.assertIn("json", r.headers["Content-Type"])
+            raw = r.read()
+        plain = (self.server.WEB / "data" / "library" / "biology.json").read_bytes()
+        self.assertEqual(gzip.decompress(raw), plain)
+        self.assertLess(len(raw), len(plain) / 2, "сжатие хотя бы вдвое")
+        _, body = self.get("/data/library/biology.json")  # без Accept-Encoding — обычный файл
+        self.assertEqual(body, plain)
+
     def test_health(self):
         _, raw = self.get("/api/health")
         self.assertTrue(json.loads(raw)["ok"])
@@ -223,6 +236,56 @@ class ServerTest(unittest.TestCase):
                 self.assertEqual(r["level"], 1, "сервер понижает уровень до подсказки")
         finally:
             self.post("/api/settings", {"exam": False}, token)
+
+    def test_teacher_ai_answers_any_question_from_model_knowledge(self):
+        from unittest import mock
+        self.assertEqual(self.status("/api/teacher/ask", {"message": "План урока"}), 403)
+        token = self.post("/api/teacher/login", {"pin": "2026"})["token"]
+        seen = []
+
+        def fake_stream(msgs, max_tokens=None):
+            seen.append(msgs)
+            yield from ["1. Разминка. ", "2. Опыт."]
+
+        llm = self.server.llm
+        with mock.patch.object(llm, "model", return_value="fake"), mock.patch.object(llm, "chat_stream", fake_stream):
+            req = urllib.request.Request(self.base + "/api/teacher/ask", headers={"Content-Type": "application/json", "X-Teacher-Token": token},
+                                         data=json.dumps({"message": "Составь план урока про вулканы", "stream": True}).encode())
+            with urllib.request.urlopen(req, timeout=30) as r:
+                lines = [json.loads(x) for x in r if x.strip()]
+        self.assertEqual(lines[-1]["answer"], "1. Разминка. 2. Опыт.")
+        system = seen[0][0]["content"]
+        self.assertIn("из своих знаний", system)
+        self.assertNotIn("ФРАГМЕНТЫ", system, "помощник учителя не опирается на библиотеку сайта")
+        self.assertEqual(seen[0][-1], {"role": "user", "content": "Составь план урока про вулканы"})
+
+    def test_key_from_teacher_cabinet(self):
+        from unittest import mock
+        import os
+        online = self.server.llm.online
+        secret = "sk-test-0123456789abcd"
+        self.assertEqual(self.status("/api/teacher/keys", {"provider": "openai", "key": secret}), 403)
+        token = self.post("/api/teacher/login", {"pin": "2026"})["token"]
+        with tempfile.TemporaryDirectory() as d, mock.patch.object(online, "KEYS_FILE", Path(d) / "keys.json"), \
+                mock.patch.dict(os.environ, {"OPENAI_API_KEY": ""}), \
+                mock.patch.dict(online.PROVIDERS["openai"], {"url": "http://127.0.0.1:9"}):
+            self.assertEqual(self.status("/api/teacher/keys", {"provider": "openai", "key": "short"}, token), 400)
+            r = self.post("/api/teacher/keys", {"provider": "openai", "key": secret}, token)
+            gpt = next(p for p in r["online"] if p["id"] == "openai")
+            self.assertTrue(gpt["hasKey"])
+            self.assertEqual(gpt["masked"], "…abcd")
+            self.assertEqual(gpt["source"], "saved")
+            _, raw = self.get("/api/health")
+            self.assertNotIn(secret, raw.decode(), "полный ключ не уходит на страницу")
+            self.assertNotIn(secret, json.dumps(r))
+            self.assertIn(secret, (Path(d) / "keys.json").read_text(encoding="utf-8"), "ключ сохранён на коробке")
+            self.assertEqual(self.post("/api/settings", {"provider": "openai"}, token)["provider"], "openai")
+            t = self.post("/api/teacher/test-key", {"provider": "openai"}, token)
+            self.assertFalse(t["ok"])
+            self.assertEqual(t["error"], "нет связи с интернетом")
+            r = self.post("/api/teacher/keys", {"provider": "openai", "key": ""}, token)
+            self.assertFalse(next(p for p in r["online"] if p["id"] == "openai")["hasKey"])
+            self.assertEqual(r["provider"], "local", "без ключа снова отвечает локальная модель")
 
     def test_switch_to_online_provider_needs_pin_and_key(self):
         from unittest import mock

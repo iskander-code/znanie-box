@@ -3,7 +3,9 @@
 Необязательный режим для показа с интернетом. Основной режим — локальная Qwen без интернета:
 если ключа нет, интернета нет или онлайн-сервис ответил ошибкой, Сова отвечает локальной моделью.
 
-Ключи берутся только из переменных окружения на коробке, на страницу они не попадают:
+Ключ проще всего вставить в кабинете учителя (блок «Какая нейросеть отвечает»): он сохраняется
+в data/keys.json на коробке. Можно задать и переменной окружения. На страницу ключ не попадает —
+показываются только последние 4 символа.
   ANTHROPIC_API_KEY   Claude    модель: ZNANIE_CLAUDE_MODEL  (по умолчанию claude-opus-5-5)
   OPENAI_API_KEY      GPT       модель: ZNANIE_OPENAI_MODEL  (по умолчанию gpt-5-mini)
   GEMINI_API_KEY      Gemini    модель: ZNANIE_GEMINI_MODEL  (по умолчанию gemini-4-hydrogen)
@@ -15,8 +17,10 @@ from __future__ import annotations
 
 import json
 import os
+import threading
 import urllib.parse
 import urllib.request
+from pathlib import Path
 
 # Ответы Совы короткие (до 5–6 предложений, это задано в подсказке). Запас нужен потому, что у
 # «думающих» моделей рассуждение тоже расходует этот предел: слишком маленький обрежет ответ.
@@ -33,8 +37,61 @@ PROVIDERS = {
 }
 
 
+KEYS_FILE = Path(__file__).resolve().parent.parent / "data" / "keys.json"
+_keys_lock = threading.Lock()
+
+
+def _saved() -> dict:
+    try:
+        return json.loads(KEYS_FILE.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+
+
+def set_key(pid: str, key: str):
+    """Сохранить ключ, введённый в кабинете учителя. Пустой ключ — удалить."""
+    if pid not in PROVIDERS:
+        raise ValueError("Неизвестная нейросеть")
+    key = key.strip()
+    if key and (len(key) < 10 or any(c.isspace() for c in key)):
+        raise ValueError("Похоже, ключ вставлен не полностью или с пробелами")
+    with _keys_lock:
+        keys = _saved()
+        if key:
+            keys[pid] = key
+        else:
+            keys.pop(pid, None)
+        KEYS_FILE.parent.mkdir(parents=True, exist_ok=True)
+        tmp = KEYS_FILE.with_suffix(".tmp")
+        tmp.write_text(json.dumps(keys), encoding="utf-8")
+        tmp.replace(KEYS_FILE)
+
+
 def _key(pid: str) -> str:
-    return os.environ.get(PROVIDERS[pid]["key"], "").strip()
+    """Ключ из кабинета учителя, иначе из переменной окружения."""
+    return (_saved().get(pid) or os.environ.get(PROVIDERS[pid]["key"], "")).strip()
+
+
+def status() -> list[dict]:
+    """Все онлайн-нейросети для кабинета учителя: есть ли ключ и откуда (сам ключ не отдаётся)."""
+    saved = _saved()
+    out = []
+    for pid, p in PROVIDERS.items():
+        key = _key(pid)
+        out.append({"id": pid, "name": p["name"], "model": model_of(pid), "hasKey": bool(key),
+                    "masked": f"…{key[-4:]}" if key else "", "source": "saved" if saved.get(pid) else "env" if key else "",
+                    "env": p["key"]})
+    return out
+
+
+def test(pid: str) -> str:
+    """Короткий пробный запрос: подошёл ли ключ. Возвращает начало ответа или поднимает ошибку."""
+    text = ""
+    for piece in stream(pid, [{"role": "user", "content": "Ответь одним словом по-русски: готово"}]):
+        text += piece
+        if len(text) > 40:
+            break
+    return text.strip() or "(пустой ответ)"
 
 
 def model_of(pid: str) -> str:

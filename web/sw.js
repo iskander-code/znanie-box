@@ -1,6 +1,6 @@
 // Офлайн-режим: после первого открытия сайт целиком хранится на устройстве
 // и работает без интернета. Список файлов проверяется тестом (tests/engine.test.mjs).
-const VERSION = 'znanie-v6';
+const VERSION = 'znanie-v8';
 // Опыты PhET (≈95 МБ) не скачиваются заранее: каждый сохраняется при первом открытии
 // или по кнопке «Сохранить все опыты». Их кэш не очищается при обновлении сайта.
 const PHET = 'znanie-phet';
@@ -13,6 +13,9 @@ const FILES = [
   'data/graphs/ohm.json',
   'data/graphs/tselina.json',
   'data/library/algebra.json',
+  'data/library/biology.json',
+  'data/library/chemistry.json',
+  'data/library/geography.json',
   'data/library/geometry.json',
   'data/library/history.json',
   'data/library/index.json',
@@ -25,6 +28,7 @@ const FILES = [
   'js/engine.js',
   'js/graph-view.js',
   'js/llm-browser.js',
+  'js/online-browser.js',
   'js/qr.js',
   'js/teacher.js',
   'js/tutor-local.js',

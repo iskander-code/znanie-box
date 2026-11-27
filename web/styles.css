@@ -337,3 +337,19 @@ section.step { margin: 14px 0; }
 .radio { display: flex; gap: 10px; align-items: flex-start; padding: 10px 12px; min-height: var(--tap); border: var(--border) solid var(--line); border-radius: var(--radius); cursor: pointer; }
 .radio:has(input:checked) { border-color: var(--accent); background: var(--accent-soft); }
 .radio input { width: 20px; height: 20px; margin-top: 2px; flex: none; accent-color: var(--accent); }
+
+/* ИИ-помощник учителя */
+.ai-messages { max-height: 60vh; min-height: 0; overflow-y: auto; margin: 10px 0; }
+.ai-messages .msg.assistant { white-space: pre-wrap; }
+.composer textarea { flex: 1; min-width: 0; font: inherit; padding: 10px 12px; border-radius: var(--radius); border: var(--border) solid var(--line); background: var(--surface); color: var(--ink); resize: vertical; min-height: var(--tap); }
+.step .composer { position: static; background: none; }
+
+/* Ключи онлайн-нейросетей */
+.radio.provider { cursor: default; }
+.radio.on { border-color: var(--accent); background: var(--accent-soft); }
+.radio .grow { flex: 1; min-width: 0; }
+.key-row { margin-top: 6px; align-items: center; gap: 8px; }
+.key-row input[type=password] { flex: 1; min-width: 0; min-height: var(--tap); padding: 6px 10px; font: inherit; border-radius: 8px; border: var(--border) solid var(--line); background: var(--surface); color: var(--ink); }
+.btn.small { min-height: var(--tap); padding: 6px 12px; font-size: .9rem; }
+.small.ok { color: var(--pos); margin-top: 4px; }
+.small.bad { color: var(--neg); margin-top: 4px; }

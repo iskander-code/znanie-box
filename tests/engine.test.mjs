@@ -80,7 +80,10 @@ test('Сова находит источник, наводит на мысль �
   const lib = new Library(texts);
   const q = 'Почему высохло Аральское море?';
   const fr = lib.search(q);
-  assert.equal(fr[0].title, 'Трагедия Аральского моря');
+  // Про Арал теперь есть темы в истории, биологии и географии: первым может оказаться любая,
+  // но тема со схемой «Что будет, если…» должна быть среди первых трёх.
+  assert.match(fr[0].title, /Арал/);
+  assert.ok(fr.slice(0, 3).some((f) => f.title === 'Трагедия Аральского моря'));
   const hint = localAnswer({ message: q, mode: 'socratic', level: 0, fragments: fr });
   assert.match(hint.text, /причин/);
   assert.equal(lib.search('Что такое закон Ома?')[0].title, 'Закон Ома для участка цепи');

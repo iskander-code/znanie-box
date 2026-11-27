@@ -10,7 +10,9 @@
 from __future__ import annotations
 
 import argparse
+import gzip
 import json
+import os
 import re
 import socket
 import sys
@@ -73,9 +75,18 @@ MODES = {
     ("explain", 0): "Объясни ответ полностью по фрагментам и предложи ученику пересказать его своими словами.",
     ("simpler", 0): "Объясни как ученику 5 класса, одним коротким примером из сельской жизни (огород, ферма, речка, сельский магазин).",
 }
+# ИИ-помощник учителя: отвечает на любые вопросы из собственных знаний нейросети, а не из библиотеки сайта.
+TEACHER_AI = (
+    "Ты — ИИ-помощник учителя сельской школы в Казахстане. Отвечай по-русски, по делу и структурно: "
+    "списки, шаги, примеры. Отвечай на любые вопросы учителя из своих знаний: план урока, задачи и ответы к ним, "
+    "объяснение темы для нужного класса, идеи опытов и игр, проверочные вопросы, письма родителям, работа с классом. "
+    "Если не уверен в фактах, датах или числах — так и скажи и посоветуй сверить с учебником или официальной программой. "
+    "Не помогай с опасным, незаконным или вредным для детей содержанием."
+)
+
 # Предел длины ответа в токенах: подсказка короткая, объяснение длиннее. Обычные ответы короче предела,
 # он лишь не даёт модели «заговориться» — на слабом устройстве это десятки секунд.
-MAX_TOKENS = {"hint": 160, "answer": 350, "general": 350, "debrief": 400}
+MAX_TOKENS = {"hint": 160, "answer": 350, "general": 350, "debrief": 400, "teacher": 1500}
 DEBRIEF = (
     "Ты — Сова, наставник школьника. Ученик сделал прогноз и запустил симуляцию причинно-следственной схемы. "
     "Разбери результат по-русски, не больше 7 предложений. Похвали верные догадки. Для каждой ошибки объясни "
@@ -120,6 +131,42 @@ class Handler(SimpleHTTPRequestHandler):
         ".webmanifest": "application/manifest+json",
     }
 
+    # Сжатие: 30 телефонов делят одну раздачу ноутбука, а текст и опыты PhET сжимаются в 3–5 раз.
+    GZIP_TYPES = (".html", ".js", ".json", ".css", ".svg", ".webmanifest")
+    _gz_cache: dict = {}
+    _gz_lock = threading.Lock()
+
+    def _send_gzip(self) -> bool:
+        """Отдаёт статический файл сжатым, если браузер это умеет. False — пусть отдаст обычный обработчик."""
+        if "gzip" not in self.headers.get("Accept-Encoding", ""):
+            return False
+        fs_path = self.translate_path(self.path)
+        if os.path.isdir(fs_path):
+            fs_path = os.path.join(fs_path, "index.html")
+        if not fs_path.endswith(self.GZIP_TYPES) or not os.path.isfile(fs_path):
+            return False
+        st = os.stat(fs_path)
+        key = (fs_path, st.st_mtime_ns, st.st_size)
+        with self._gz_lock:
+            data = self._gz_cache.get(key)
+        if data is None:
+            with open(fs_path, "rb") as f:
+                data = gzip.compress(f.read(), compresslevel=6, mtime=0)
+            with self._gz_lock:
+                # Старые версии файла (после обновления с флешки) из кэша выбрасываем.
+                for k in [k for k in self._gz_cache if k[0] == fs_path]:
+                    del self._gz_cache[k]
+                self._gz_cache[key] = data
+        self.send_response(HTTPStatus.OK)
+        self.send_header("Content-Type", self.guess_type(fs_path))
+        self.send_header("Content-Encoding", "gzip")
+        self.send_header("Vary", "Accept-Encoding")
+        self.send_header("Content-Length", str(len(data)))
+        self.end_headers()
+        if self.command != "HEAD":
+            self.wfile.write(data)
+        return True
+
     def end_headers(self):
         if not self.path.startswith("/api/"):
             self.send_header("Cache-Control", "no-cache")  # после обновления с флешки ученики сразу видят новое
@@ -151,6 +198,8 @@ class Handler(SimpleHTTPRequestHandler):
 
     def do_GET(self):
         path = self.path.split("?")[0]
+        if not path.startswith("/api/") and self._send_gzip():
+            return
         if path == "/api/health":
             host, port = self.server.server_address[:2]
             box = host == "0.0.0.0"
@@ -193,6 +242,32 @@ class Handler(SimpleHTTPRequestHandler):
                     except ValueError as e:
                         return self._json({"error": str(e)}, HTTPStatus.BAD_REQUEST)
                 return self._json(self._settings())
+            if path == "/api/teacher/keys":
+                # Ключ онлайн-нейросети из кабинета учителя: сохранить (key) или удалить (пустой key).
+                if not self._teacher():
+                    return self._denied()
+                pid = str(body.get("provider", ""))
+                try:
+                    llm.online.set_key(pid, str(body.get("key", "")))
+                except ValueError as e:
+                    return self._json({"error": str(e)}, HTTPStatus.BAD_REQUEST)
+                if not body.get("key") and llm.provider() == "local" and TEACHER.state.get("provider") == pid:
+                    TEACHER.set("provider", "local")
+                return self._json(self._settings())
+            if path == "/api/teacher/test-key":
+                if not self._teacher():
+                    return self._denied()
+                pid = str(body.get("provider", ""))
+                try:
+                    return self._json({"ok": True, "reply": llm.online.test(pid)})
+                except llm.online.Refused:
+                    return self._json({"ok": True, "reply": "ключ работает (модель отказалась от пробного вопроса)"})
+                except Exception as e:  # noqa: BLE001 — показываем учителю причину простыми словами
+                    return self._json({"ok": False, "error": llm.online.describe(e)})
+            if path == "/api/teacher/ask":
+                if not self._teacher():
+                    return self._denied()
+                return self._teacher_ask(body)
             if path == "/api/teacher/reset-stats":
                 if not self._teacher():
                     return self._denied()
@@ -233,8 +308,22 @@ class Handler(SimpleHTTPRequestHandler):
         except Exception as e:  # ошибка модели не должна ронять сервер
             return self._json({"error": f"Ошибка: {e}"}, HTTPStatus.INTERNAL_SERVER_ERROR)
 
+    def _teacher_ask(self, body: dict):
+        """ИИ-помощник учителя: любой вопрос, ответ из знаний нейросети (Qwen или онлайн по выбору учителя)."""
+        question = str(body.get("message", "")).strip()[:4000]
+        if not question:
+            return self._json({"error": "Пустой вопрос"}, HTTPStatus.BAD_REQUEST)
+        if not llm.available():
+            return self._json({"answer": None, "llm": False, "error": "Нейросеть не запущена: запустите Ollama или задайте ключ онлайн-нейросети."})
+        history = [{"role": m["role"], "content": str(m.get("content", ""))[:4000]}
+                   for m in body.get("history", [])[-8:] if m.get("role") in ("user", "assistant")]
+        msgs = [{"role": "system", "content": TEACHER_AI}, *history, {"role": "user", "content": question}]
+        meta = {"llm": True, "model": llm.label()}
+        return self._answer(meta, msgs, MAX_TOKENS["teacher"], False, bool(body.get("stream")))
+
     def _settings(self) -> dict:
-        return {"exam": TEACHER.exam, "provider": llm.provider(), "providers": llm.online.available(), "model": llm.label()}
+        return {"exam": TEACHER.exam, "provider": llm.provider(), "providers": llm.online.available(),
+                "online": llm.online.status(), "model": llm.label(), "llm": llm.available(), "localModel": llm.model()}
 
     def _chat(self, body: dict):
         mode = body.get("mode", "socratic")
