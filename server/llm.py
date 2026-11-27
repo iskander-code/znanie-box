@@ -50,7 +50,9 @@ def model() -> str | None:
 
 def status() -> dict:
     m = model()
-    return {"llm": bool(m), "model": m, "mode": "cloud" if API_KEY else "local", "device": device()}
+    pid = provider()
+    return {"llm": available(), "model": label(), "localModel": m, "mode": "cloud" if API_KEY else "local", "device": device(),
+            "provider": pid, "providers": online.available()}
 
 
 # Без видеокарты модель поменьше отвечает в 2–2,5 раза быстрее (замер: python scripts/bench.py --weak).
@@ -130,3 +132,72 @@ def warm_up(log=print):
             log(f"Нейросеть: модель {model()} загружена ({'видеокарта' if on_gpu else 'процессор'})")
     except (urllib.error.URLError, OSError, ValueError, KeyError, RuntimeError) as e:
         log(f"Нейросеть: прогрев не удался ({e})")
+
+
+# ---------- выбор нейросети для ответов Совы: локальная Qwen или онлайн по ключу ----------
+import online  # noqa: E402
+
+_provider = {"id": "local"}
+FALLBACK_NOTE = "\n\n(Онлайн-нейросеть недоступна — ответила локальная модель.)"
+REFUSED_TEXT = "Я не могу ответить на этот вопрос. Спроси учителя или родителей."
+
+
+class OnlineUnavailable(RuntimeError):
+    """Онлайн-нейросеть не ответила, а локальной модели нет."""
+
+
+def provider() -> str:
+    """'local' или id онлайн-нейросети. Если ключ убрали — снова локальная."""
+    pid = _provider["id"]
+    return pid if pid == "local" or any(p["id"] == pid for p in online.available()) else "local"
+
+
+def set_provider(pid: str) -> str:
+    if pid != "local" and not any(p["id"] == pid for p in online.available()):
+        raise ValueError("Для этой нейросети на коробке не задан ключ")
+    _provider["id"] = pid
+    return provider()
+
+
+def available() -> bool:
+    """Есть ли чем отвечать: онлайн-нейросеть выбрана или локальная модель запущена."""
+    return provider() != "local" or bool(model())
+
+
+def label() -> str | None:
+    """Название нейросети, которая сейчас отвечает, — для подписи под ответом."""
+    pid = provider()
+    return online.label(pid) if pid != "local" else model()
+
+
+def ask_stream(messages: list[dict], max_tokens: int | None = None):
+    """Ответ Совы по кусочкам выбранной нейросетью.
+
+    Онлайн-нейросеть недоступна (нет интернета, ключ не подошёл, сервис упал) до первого слова —
+    отвечает локальная модель, и в конце ответа есть пометка. Отказ по правилам безопасности
+    локальной моделью не обходится.
+    """
+    pid = provider()
+    if pid != "local":
+        started = False
+        try:
+            for piece in online.stream(pid, messages):
+                started = True
+                yield piece
+            return
+        except online.Refused:
+            if not started:
+                yield REFUSED_TEXT
+            return
+        except Exception as e:  # noqa: BLE001 — любая сетевая ошибка: переходим на локальную модель
+            if started or not model():
+                raise OnlineUnavailable(f"{online.PROVIDERS[pid]['name']}: {online.describe(e)}") from e
+        for piece in chat_stream(messages, max_tokens=max_tokens):
+            yield piece
+        yield FALLBACK_NOTE
+        return
+    yield from chat_stream(messages, max_tokens=max_tokens)
+
+
+def ask(messages: list[dict], max_tokens: int | None = None) -> str:
+    return "".join(ask_stream(messages, max_tokens))

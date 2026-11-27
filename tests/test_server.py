@@ -6,7 +6,7 @@ import unittest
 import urllib.error
 import urllib.request
 from functools import partial
-from http.server import ThreadingHTTPServer
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -223,6 +223,132 @@ class ServerTest(unittest.TestCase):
                 self.assertEqual(r["level"], 1, "сервер понижает уровень до подсказки")
         finally:
             self.post("/api/settings", {"exam": False}, token)
+
+    def test_switch_to_online_provider_needs_pin_and_key(self):
+        from unittest import mock
+        import os
+        self.assertEqual(self.status("/api/settings", {"provider": "claude"}), 403)
+        token = self.post("/api/teacher/login", {"pin": "2026"})["token"]
+        with mock.patch.dict(os.environ, {"ANTHROPIC_API_KEY": ""}):
+            self.assertEqual(self.status("/api/settings", {"provider": "claude"}, token), 400, "без ключа нельзя")
+        with mock.patch.dict(os.environ, {"ANTHROPIC_API_KEY": "test-key"}):
+            try:
+                r = self.post("/api/settings", {"provider": "claude"}, token)
+                self.assertEqual(r["provider"], "claude")
+                self.assertIn("онлайн", r["model"])
+                _, raw = self.get("/api/health")
+                health = json.loads(raw)
+                self.assertEqual(health["provider"], "claude")
+                self.assertNotIn("test-key", raw.decode(), "ключ не уходит на страницу")
+            finally:
+                self.post("/api/settings", {"provider": "local"}, token)
+
+
+class FakeProviders(BaseHTTPRequestHandler):
+    """Имитация Claude, OpenAI и Gemini: отвечает потоком SSE в формате каждого сервиса."""
+    requests: list = []
+    refuse = False
+
+    def log_message(self, *args):
+        pass
+
+    def do_POST(self):
+        body = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
+        FakeProviders.requests.append((self.path, {k.lower(): v for k, v in self.headers.items()}, body))
+        self.send_response(200)
+        self.send_header("Content-Type", "text/event-stream")
+        self.end_headers()
+        if self.path.startswith("/v1/messages"):
+            events = [{"type": "message_start"}, {"type": "content_block_delta", "delta": {"type": "thinking_delta", "thinking": ""}}]
+            events += [{"type": "content_block_delta", "delta": {"type": "text_delta", "text": t}} for t in ("Привет ", "от Claude")]
+            if FakeProviders.refuse:
+                events = [{"type": "message_delta", "delta": {"stop_reason": "refusal"}}]
+            events.append({"type": "message_stop"})
+        elif self.path.startswith("/v1/chat/completions"):
+            events = [{"choices": [{"delta": {"content": t}}]} for t in ("Привет ", "от GPT")]
+        else:
+            events = [{"candidates": [{"content": {"parts": [{"text": "думаю", "thought": True}, {"text": t}]}}]} for t in ("Привет ", "от Gemini")]
+        for ev in events:
+            self.wfile.write(f"event: x\ndata: {json.dumps(ev, ensure_ascii=False)}\n\n".encode())
+        if self.path.startswith("/v1/chat"):
+            self.wfile.write(b"data: [DONE]\n\n")
+
+
+class OnlineTest(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        import online
+        cls.online = online
+        cls.httpd = ThreadingHTTPServer(("127.0.0.1", 0), FakeProviders)
+        url = f"http://127.0.0.1:{cls.httpd.server_address[1]}"
+        threading.Thread(target=cls.httpd.serve_forever, daemon=True).start()
+        cls.saved = {pid: p["url"] for pid, p in online.PROVIDERS.items()}
+        for p in online.PROVIDERS.values():
+            p["url"] = url
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.httpd.shutdown()
+        for pid, u in cls.saved.items():
+            cls.online.PROVIDERS[pid]["url"] = u
+
+    def setUp(self):
+        FakeProviders.requests.clear()
+        FakeProviders.refuse = False
+
+    MSGS = [{"role": "system", "content": "Ты — Сова."}, {"role": "user", "content": "Что такое закон Ома?"},
+            {"role": "system", "content": "Закончи вопросом."}]
+
+    def keys(self, **extra):
+        import os
+        from unittest import mock
+        return mock.patch.dict(os.environ, {"ANTHROPIC_API_KEY": "k-a", "OPENAI_API_KEY": "k-o", "GEMINI_API_KEY": "k-g", **extra})
+
+    def test_each_provider_streams_text(self):
+        with self.keys():
+            self.assertEqual([p["id"] for p in self.online.available()], ["claude", "openai", "gemini"])
+            for pid, expected in (("claude", "Привет от Claude"), ("openai", "Привет от GPT"), ("gemini", "Привет от Gemini")):
+                self.assertEqual("".join(self.online.stream(pid, self.MSGS)), expected, pid)
+        (p1, h1, b1), (p2, h2, b2), (p3, h3, b3) = FakeProviders.requests
+        self.assertEqual(h1["x-api-key"], "k-a")
+        self.assertEqual(b1["model"], "claude-opus-5-5")
+        self.assertEqual(b1["system"], "Ты — Сова.\n\nЗакончи вопросом.", "все указания — в одно системное поле")
+        self.assertEqual([m["role"] for m in b1["messages"]], ["user"])
+        self.assertEqual(h2["authorization"], "Bearer k-o")
+        self.assertEqual(h3["x-goog-api-key"], "k-g")
+        self.assertIn(":streamGenerateContent", p3)
+        self.assertEqual(b3["systemInstruction"]["parts"][0]["text"], "Ты — Сова.\n\nЗакончи вопросом.")
+
+    def test_model_can_be_changed_by_env(self):
+        with self.keys(ZNANIE_CLAUDE_MODEL="claude-haiku-5-5"):
+            "".join(self.online.stream("claude", self.MSGS))
+        self.assertEqual(FakeProviders.requests[0][2]["model"], "claude-haiku-5-5")
+
+    def test_no_internet_falls_back_to_local_model(self):
+        import llm
+        from unittest import mock
+        with self.keys(), mock.patch.object(llm, "model", return_value="qwen2.5:3b"), \
+                mock.patch.object(llm, "chat_stream", lambda msgs, max_tokens=None: iter(["Ответ ", "Qwen"])), \
+                mock.patch.dict(self.online.PROVIDERS["openai"], {"url": "http://127.0.0.1:9"}):
+            llm.set_provider("openai")
+            try:
+                text = llm.ask(self.MSGS)
+            finally:
+                llm.set_provider("local")
+        self.assertTrue(text.startswith("Ответ Qwen"))
+        self.assertIn("локальная модель", text)
+
+    def test_refusal_is_not_bypassed_by_local_model(self):
+        import llm
+        from unittest import mock
+        FakeProviders.refuse = True
+        local = mock.Mock(side_effect=AssertionError("локальная модель не должна отвечать после отказа"))
+        with self.keys(), mock.patch.object(llm, "chat_stream", local):
+            llm.set_provider("claude")
+            try:
+                self.assertEqual(llm.ask(self.MSGS), llm.REFUSED_TEXT)
+            finally:
+                llm.set_provider("local")
 
 
 if __name__ == "__main__":

@@ -84,6 +84,7 @@ async function syncSettings() {
   try {
     const r = await getJSON('api/settings');
     if (r.exam !== S.exam) { S.exam = r.exam; renderStatus(); if (/^#\/(sova|teacher)/.test(location.hash) && !S.chat.busy) route(); }
+    if (r.provider && r.provider !== S.server.provider) { Object.assign(S.server, { provider: r.provider, model: r.model }); renderStatus(); }
   } catch { /* коробка недоступна — оставляем как было */ }
 }
 
@@ -278,7 +279,7 @@ async function chatServer(body, onDelta) {
   await readNDJSON(r, (line) => {
     if (line.type === 'meta') meta = line;
     else if (line.type === 'delta') onDelta(line.text);
-    else if (line.type === 'done') answer = line.answer;
+    else if (line.type === 'done') { answer = line.answer; if (line.note) meta.note = line.note; }
     else if (line.type === 'error') throw new Error(line.error);
   });
   return { ...meta, answer };
@@ -306,7 +307,7 @@ async function askSova(question, level, mode = S.chat.mode) {
         const f = r.fragments || [];
         reply = { text: r.answer, sources: [...new Map(f.slice(0, 2).map((x) => [x.title, x])).values()], graph: f.find((x) => x.graph)?.graph || null, by: `нейросеть ${r.model}` };
       } else {
-        reply = { ...localAnswer({ message: question, mode, level, fragments: r.fragments || [] }), by: r.llm ? 'подсказка-шаблон' : 'без нейросети' };
+        reply = { ...localAnswer({ message: question, mode, level, fragments: r.fragments || [] }), by: r.note ? `подсказка-шаблон · онлайн-нейросеть недоступна (${r.note})` : r.llm ? 'подсказка-шаблон' : 'без нейросети' };
       }
     } else if (S.exam && !RELEVANT(S.lib.search(question))) {
       reply = { text: EXAM_GENERAL, sources: [], graph: null, by: 'режим контрольной', general: true };
@@ -846,6 +847,8 @@ function viewTeacher() {
   app.innerHTML = `
   <div class="ex-head"><h1>Кабинет учителя</h1><div class="row"><span class="badge on">✓ Режим учителя</span><button class="btn ghost" data-action="t-logout">Выйти</button></div></div>
 
+  ${providerSection()}
+
   <section class="step">
     <h3>📝 Режим контрольной работы</h3>
     <label class="switch"><input type="checkbox" role="switch" data-action-change="exam" ${S.exam ? 'checked' : ''}><span>${S.exam ? 'Включён: Сова даёт только подсказки, кнопки «Покажи ответ», «Объясни» и «Объясни проще» скрыты' : 'Выключен'}</span></label>
@@ -1113,6 +1116,34 @@ function showTTSNote(msg) {
   el.hidden = !msg;
 }
 
+async function setProvider(pid) {
+  try {
+    const r = await teacherPost('api/settings', { provider: pid });
+    Object.assign(S.server, { provider: r.provider, model: r.model, providers: r.providers, llm: true });
+    S.teacher.providerError = '';
+  } catch (e) { S.teacher.providerError = e.message; }
+  renderStatus();
+  viewTeacher();
+}
+
+/** Выбор нейросети: локальная Qwen всегда есть, онлайн — только с ключом на коробке. */
+function providerSection() {
+  if (!S.server) return '';
+  const cur = S.server.provider || 'local';
+  const online = S.server.providers || [];
+  const local = S.server.localModel;
+  const opt = (id, title, note) => `<label class="radio"><input type="radio" name="provider" value="${esc(id)}" data-action-change="provider" ${cur === id ? 'checked' : ''}><span><strong>${esc(title)}</strong><br><span class="muted small">${note}</span></span></label>`;
+  return `<section class="step">
+    <h3>🧠 Какая нейросеть отвечает</h3>
+    <div class="radios" role="radiogroup" aria-label="Нейросеть">
+      ${opt('local', `Без интернета · ${local || 'локальная модель'}`, local ? 'Вопросы не покидают коробку. Основной режим.' : 'Модель не запущена: Сова отвечает подсказками-шаблонами. Запустите Ollama.')}
+      ${online.map((p) => opt(p.id, `${p.name} · ${p.model} (онлайн)`, '⚠ Нужен интернет. Вопросы учеников уходят в сервис компании-разработчика. Если интернет пропадёт, ответит модель без интернета.')).join('')}
+    </div>
+    ${online.length ? '' : '<p class="muted small">Онлайн-нейросети появятся здесь, когда на коробке задан ключ: <code>ANTHROPIC_API_KEY</code> (Claude), <code>OPENAI_API_KEY</code> (GPT) или <code>GEMINI_API_KEY</code> (Gemini). Как задать — в README, раздел «Онлайн-режим».</p>'}
+    ${S.teacher.providerError ? `<div class="info bad" role="alert">${esc(S.teacher.providerError)}</div>` : ''}
+  </section>`;
+}
+
 async function setExam(on) {
   try {
     if (S.server) S.exam = (await teacherPost('api/settings', { exam: on })).exam;
@@ -1126,6 +1157,7 @@ app.addEventListener('change', (ev) => {
   const ac = ev.target.dataset.actionChange;
   if (ac === 'grade') { S.chat.grade = Number(ev.target.value); store.set('grade', S.chat.grade); }
   if (ac === 'exam') setExam(ev.target.checked);
+  if (ac === 'provider') setProvider(ev.target.value);
   if (ac === 'qr-url') { S.qrUrl = ev.target.value; viewConnect(); }
   if (ac === 'check') { const c = store.get('checklist', {}); c[ev.target.dataset.id] = ev.target.checked; store.set('checklist', c); }
   if (ev.target.dataset.actionInput === 'slider') drawPanel();

@@ -331,3 +331,9 @@ section.step { margin: 14px 0; }
 @keyframes caret { 50% { opacity: 0; } }
 :root[data-theme="a11y"] .msg.typing.live::after { animation: none; }
 @media (prefers-reduced-motion: reduce) { .msg.typing.live::after { animation: none; } }
+
+/* Выбор нейросети в кабинете учителя */
+.radios { display: grid; gap: 8px; }
+.radio { display: flex; gap: 10px; align-items: flex-start; padding: 10px 12px; min-height: var(--tap); border: var(--border) solid var(--line); border-radius: var(--radius); cursor: pointer; }
+.radio:has(input:checked) { border-color: var(--accent); background: var(--accent-soft); }
+.radio input { width: 20px; height: 20px; margin-top: 2px; flex: none; accent-color: var(--accent); }

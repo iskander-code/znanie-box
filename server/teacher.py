@@ -91,6 +91,12 @@ class Teacher:
     def exam(self) -> bool:
         return bool(self.state["exam"])
 
+    def set(self, key: str, value):
+        """Сохранить настройку коробки (например, выбранную нейросеть)."""
+        with self.lock:
+            self.state[key] = value
+            self._save()
+
     def set_exam(self, on: bool):
         with self.lock:
             self.state["exam"] = bool(on)

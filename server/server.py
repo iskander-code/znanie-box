@@ -157,7 +157,7 @@ class Handler(SimpleHTTPRequestHandler):
             lan = [f"http://{a}:{port}/" for a in lan_addresses()] if box else []
             return self._json({"ok": True, **llm.status(), "tts": tts.available(), "exam": TEACHER.exam, "box": box, "lan": lan})
         if path == "/api/settings":
-            return self._json({"exam": TEACHER.exam})
+            return self._json(self._settings())
         if path == "/api/teacher/summary":
             if not self._teacher():
                 return self._denied()
@@ -185,8 +185,14 @@ class Handler(SimpleHTTPRequestHandler):
             if path == "/api/settings":
                 if not self._teacher():
                     return self._denied()
-                TEACHER.set_exam(bool(body.get("exam")))
-                return self._json({"exam": TEACHER.exam})
+                if "exam" in body:
+                    TEACHER.set_exam(bool(body.get("exam")))
+                if "provider" in body:
+                    try:
+                        TEACHER.set("provider", llm.set_provider(str(body["provider"])))
+                    except ValueError as e:
+                        return self._json({"error": str(e)}, HTTPStatus.BAD_REQUEST)
+                return self._json(self._settings())
             if path == "/api/teacher/reset-stats":
                 if not self._teacher():
                     return self._denied()
@@ -227,13 +233,16 @@ class Handler(SimpleHTTPRequestHandler):
         except Exception as e:  # ошибка модели не должна ронять сервер
             return self._json({"error": f"Ошибка: {e}"}, HTTPStatus.INTERNAL_SERVER_ERROR)
 
+    def _settings(self) -> dict:
+        return {"exam": TEACHER.exam, "provider": llm.provider(), "providers": llm.online.available(), "model": llm.label()}
+
     def _chat(self, body: dict):
         mode = body.get("mode", "socratic")
         if mode == "debrief":
-            if not llm.model():
+            if not llm.available():
                 return self._json({"answer": None, "llm": False})
             msgs = [{"role": "system", "content": DEBRIEF}, {"role": "user", "content": json.dumps(body.get("context", {}), ensure_ascii=False)[:8000]}]
-            return self._json({"answer": llm.chat(msgs, max_tokens=MAX_TOKENS["debrief"]), "llm": True})
+            return self._json({"answer": llm.ask(msgs, max_tokens=MAX_TOKENS["debrief"]), "llm": True})
         fragments = LIB.search(str(body.get("message", "")))
         relevant = is_relevant(fragments)
         for f in fragments:
@@ -248,8 +257,8 @@ class Handler(SimpleHTTPRequestHandler):
             body = {**body, "mode": "socratic", "level": min(level, 1)}
             mode = "socratic"
             if not relevant:
-                return self._json({"fragments": [], "answer": EXAM_GENERAL, "exam": True, "llm": bool(llm.model()), "model": "контрольная"})
-        if not llm.model():
+                return self._json({"fragments": [], "answer": EXAM_GENERAL, "exam": True, "llm": llm.available(), "model": "контрольная"})
+        if not llm.available():
             return self._json({"fragments": fragments, "answer": None, "llm": False, "exam": exam, "level": body.get("level", 0)})
         stream = bool(body.get("stream"))
         if not relevant:
@@ -257,10 +266,10 @@ class Handler(SimpleHTTPRequestHandler):
             history = [m for m in body.get("history", [])[-6:] if m.get("role") in ("user", "assistant")]
             msgs = [{"role": "system", "content": GENERAL.format(grade=body.get("grade", 8))}, *history,
                     {"role": "user", "content": str(body.get("message", ""))[:1000]}]
-            meta = {"fragments": [], "general": True, "llm": True, "model": llm.model(), "exam": exam}
+            meta = {"fragments": [], "general": True, "llm": True, "model": llm.label(), "exam": exam}
             return self._answer(meta, msgs, MAX_TOKENS["general"], False, stream)
         hint = mode == "socratic" and int(body.get("level", 0)) < 2
-        meta = {"fragments": fragments, "llm": True, "model": llm.model(), "exam": exam, "level": body.get("level", 0)}
+        meta = {"fragments": fragments, "llm": True, "model": llm.label(), "exam": exam, "level": body.get("level", 0)}
         return self._answer(meta, tutor_messages(body, fragments[:3]), MAX_TOKENS["hint" if hint else "answer"], hint, stream)
 
     def _answer(self, meta: dict, msgs: list[dict], max_tokens: int, must_ask: bool, stream: bool):
@@ -274,7 +283,10 @@ class Handler(SimpleHTTPRequestHandler):
             return None if must_ask and "?" not in answer else answer
 
         if not stream:
-            return self._json({**meta, "answer": final(llm.chat(msgs, max_tokens=max_tokens))})
+            try:
+                return self._json({**meta, "answer": final(llm.ask(msgs, max_tokens=max_tokens))})
+            except llm.OnlineUnavailable as e:
+                return self._json({**meta, "answer": None, "note": str(e)})
         self.send_response(HTTPStatus.OK)
         self.send_header("Content-Type", "application/x-ndjson; charset=utf-8")
         self.send_header("Cache-Control", "no-store")
@@ -289,10 +301,13 @@ class Handler(SimpleHTTPRequestHandler):
         parts = []
         try:
             send({"type": "meta", **meta})
-            for piece in llm.chat_stream(msgs, max_tokens=max_tokens):
+            for piece in llm.ask_stream(msgs, max_tokens=max_tokens):
                 parts.append(piece)
                 send({"type": "delta", "text": piece})
             send({"type": "done", "answer": final("".join(parts))})
+        except llm.OnlineUnavailable as e:
+            # Ни онлайн, ни локальной модели: интерфейс покажет подсказку-шаблон по библиотеке с пометкой.
+            send({"type": "done", "answer": None, "note": str(e)})
         except (BrokenPipeError, ConnectionResetError):
             pass  # ученик закрыл страницу — генерация останавливается вместе с соединением
         except Exception as e:  # noqa: BLE001 — ошибку нейросети показываем ученику понятным текстом
@@ -323,13 +338,21 @@ def main():
         TEACHER.pin_hash = hash_pin(args.pin)
     host = "0.0.0.0" if args.box else "127.0.0.1"
     server = ThreadingHTTPServer((host, args.port), partial(Handler, directory=str(WEB)))
+    try:
+        llm.set_provider(TEACHER.state.get("provider", "local"))  # выбор учителя сохраняется между запусками
+    except ValueError:
+        pass  # ключ убрали — отвечает локальная модель
     st = llm.status()
     print(f"Знание в коробке: http://localhost:{args.port}")
     if args.box:
         for a in lan_addresses():
             print(f"  с телефонов и планшетов класса: http://{a}:{args.port}")
-    print(f"Нейросеть: {'включена, модель ' + st['model'] if st['llm'] else 'не найдена, наставник работает в демо-режиме'} ({st['mode']})")
-    if st["llm"] and st["mode"] == "local":
+    local = st["localModel"]
+    print(f"Нейросеть без интернета: {'модель ' + local if local else 'не найдена (Сова отвечает подсказками-шаблонами)'} ({st['mode']})")
+    if st["providers"]:
+        names = ", ".join(f"{p['name']} {p['model']}" for p in st["providers"])
+        print(f"Онлайн-нейросети по ключу: {names}. Сейчас отвечает: {st['model']}. Переключить — в кабинете учителя.")
+    if local and st["mode"] == "local":
         # Прогрев: первая загрузка модели в память может занять минуту-две; заодно выбираем модель под железо.
         threading.Thread(target=llm.warm_up, daemon=True).start()
     try:
