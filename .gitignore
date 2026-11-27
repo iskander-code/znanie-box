@@ -9,3 +9,4 @@ data/state.tmp
 data/keys.json
 data/keys.tmp
 data/cache.sqlite
+data/works.sqlite

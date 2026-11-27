@@ -1,6 +1,6 @@
 // Офлайн-режим: после первого открытия сайт целиком хранится на устройстве
 // и работает без интернета. Список файлов проверяется тестом (tests/engine.test.mjs).
-const VERSION = 'znanie-v13';
+const VERSION = 'znanie-v14';
 // Опыты PhET (≈95 МБ) не скачиваются заранее: каждый сохраняется при первом открытии
 // или по кнопке «Сохранить все опыты». Их кэш не очищается при обновлении сайта.
 const PHET = 'znanie-phet';
@@ -33,6 +33,8 @@ const FILES = [
   'js/markdown.js',
   'js/online-browser.js',
   'js/qr.js',
+  'js/sandbox.js',
+  'js/simulation-ui.js',
   'js/teacher.js',
   'js/tutor-local.js',
   'manifest.webmanifest',

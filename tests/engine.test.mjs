@@ -280,3 +280,40 @@ test('идея ученика: новый узел на схеме, послед
   assert.equal(relationVerb({ sign: -1, strength: 2 }), 'приводит к уменьшению');
   for (const gr of graphs) for (const e of gr.edges) assert.ok(e.verb, `${gr.id}: у связи ${e.from}→${e.to} есть понятное слово`);
 });
+
+test('прогноз словами: верные догадки, ошибки и упущенные звенья без нейросети', async () => {
+  const { checkPredictionText } = await import('../web/js/tutor-local.js');
+  const g = byId('aral');
+  const r = simulate(g, { irrigation: 0.7 });
+  const fb = checkPredictionText('Приток рек уменьшится, солёность упадёт, рыба погибнет', g, r.total, { irrigation: 0.7 }, () => 'цепочка');
+  assert.match(fb, /\*\*Верно!\*\*.*«Приток рек в море».*«Рыба в море»/s);
+  assert.match(fb, /«Солёность воды» на схеме растёт, а ты думал, что уменьшится/);
+  assert.match(fb, /\*\*Ты не упомянул:\*\*.*«Уровень моря»/);
+  assert.match(fb, /\*\*Вопрос:\*\*.*\?$/);
+  assert.match(checkPredictionText('всё будет плохо', g, r.total, { irrigation: 0.7 }), /не нашла в твоём прогнозе названий факторов/);
+});
+
+test('песочница: разбор карты мыслей для ученика и для учителя без нейросети', async () => {
+  const { localMapFeedback, mapAsGraph } = await import('../web/js/sandbox.js');
+  const map = {
+    title: 'Арал', notes: 'Я думаю, что хлопок требует много воды, поэтому реки мелеют. Это видно по карте Амударьи.',
+    nodes: [{ id: 'a', label: 'Хлопок' }, { id: 'b', label: 'Забор воды' }, { id: 'c', label: 'Уровень моря' }, { id: 'd', label: 'Туризм' }],
+    edges: [{ from: 'a', to: 'b', sign: 1, label: 'провоцирует' }, { from: 'b', to: 'c', sign: -1, label: '' }],
+  };
+  const student = localMapFeedback(map);
+  assert.match(student, /цепочка из 3 звеньев/);
+  assert.match(student, /«Туризм» пока ни с чем не связан/);
+  assert.match(student, /\*\*Вопрос:\*\* Какой промежуточный фактор может связывать «Хлопок» и «Забор воды»\?/);
+  const teacher = localMapFeedback(map, true);
+  for (const part of ['**Сильные стороны**', '**Слабые места логики**', '**Что спросить у ученика**', '**Ориентировочная оценка:**']) assert.ok(teacher.includes(part), part);
+  const g = mapAsGraph(map);
+  assert.equal(g.edges[0].verb, 'провоцирует', 'подпись ученика становится словом связи');
+  assert.equal(g.edges[1].verb, 'приводит к уменьшению');
+});
+
+test('офлайн-кэш: 95 МБ опытов PhET не скачиваются при установке', () => {
+  const sw = readFileSync(new URL('../web/sw.js', import.meta.url), 'utf8');
+  const files = sw.slice(sw.indexOf('const FILES = ['), sw.indexOf('];', sw.indexOf('const FILES = [')));
+  assert.ok(!files.includes('phet/'), 'в списке предзагрузки нет файлов phet/');
+  assert.match(sw, /url\.pathname\.includes\('\/phet\/'\)/, 'для phet/ — отдельная обработка: сохраняется при первом открытии');
+});

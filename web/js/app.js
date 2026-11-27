@@ -8,6 +8,8 @@ import { login, getToken, setToken, recordLocal, localSummary, resetLocalStats, 
 import { qrSVG } from './qr.js';
 import { renderMarkdown, markdownToText } from './markdown.js';
 import { docStructure } from './doc-structure.js';
+import { initSimulationUI, predictionFieldHTML, timelineHTML, debriefCardHTML, askDebrief, afterRun } from './simulation-ui.js';
+import { initSandbox, viewSandbox, openToMap, teacherWorksTab } from './sandbox.js';
 import { PROVIDERS as ONLINE, keyOf, setKey, onlineProvider, setOnlineProvider, onlineLabel, onlineStatus, streamOnline, testKey, describe as describeOnline, Refused } from './online-browser.js';
 
 const app = document.getElementById('app');
@@ -184,7 +186,7 @@ function route() {
   });
   closeDrawer();
   if (view !== 'explore') document.body.classList.remove('ex-fs');
-  const views = { '': viewHome, sova: viewSova, explore: viewExplore, build: viewBuild, teacher: viewTeacher, library: viewLibrary, labs: viewLabs, ai: viewAI, connect: viewConnect };
+  const views = { '': viewHome, sova: viewSova, explore: viewExplore, build: viewBuild, teacher: viewTeacher, library: viewLibrary, labs: viewLabs, ai: viewAI, connect: viewConnect, sandbox: viewSandbox };
   (views[view] || viewHome)(id ? decodeURIComponent(id) : undefined);
   window.scrollTo(0, 0);
 }
@@ -210,6 +212,7 @@ function viewHome() {
     <a class="card" href="#/sova"><span class="icon">🦉</span><strong>Спросить Сову</strong><span class="muted">Наставник ответит по книгам из библиотеки: сначала подсказкой, потом полным ответом</span></a>
     <a class="card" href="#/explore"><span class="icon">🔀</span><strong>Что будет, если…</strong><span class="muted">Измени одно условие в параграфе и проследи цепочку последствий</span></a>
     <a class="card" href="#/build"><span class="icon">🧩</span><strong>Собери сам</strong><span class="muted">Разбери параграф по фразам и собери схему причин и следствий</span></a>
+    <a class="card" href="#/sandbox"><span class="icon">🧠</span><strong>Песочница</strong><span class="muted">Своя карта мыслей: любые причины и следствия, заметки, советы Совы — и отправка работы учителю</span></a>
     <a class="card" href="#/labs"><span class="icon">🧪</span><strong>Опыты</strong><span class="muted">${S.labs.length} интерактивных лабораторий PhET по физике и математике: меняй условия и смотри, что выйдет</span></a>
     <a class="card" href="#/library"><span class="icon">📚</span><strong>Библиотека</strong><span class="muted">${S.texts.length} тем: история Казахстана, физика, алгебра, геометрия, биология, химия, география</span></a>
     <a class="card" href="#/connect"><span class="icon">📱</span><strong>Как подключить Коробку</strong><span class="muted">4 простых шага и QR-код для телефонов класса</span></a>
@@ -348,7 +351,8 @@ function renderMsg(m, i) {
   const by = m.role === 'assistant' && m.by ? `<span class="by">${esc(m.by)}</span>` : '';
   const say = m.role === 'assistant' ? `<button class="say" data-action="speak-msg" data-i="${i}" aria-pressed="false" aria-label="Озвучить ответ" title="Озвучить">🔊</button>` : '';
   const body = m.role === 'assistant' ? `<div class="md">${renderMarkdown(m.text)}</div>` : esc(m.text).replace(/\n/g, '<br>');
-  return `<div class="msg ${m.role}">${say}${body}${sources || graph ? `<div class="row">${sources}${graph}</div>` : ''}${by}</div>`;
+  const toMap = m.role === 'assistant' && m.kind === 'answer' ? `<button class="to-map-btn" data-action="to-map" data-i="${i}" title="Перенести мысль (или выделенный фрагмент) в свою карту мыслей">+ В карту мыслей</button>` : '';
+  return `<div class="msg ${m.role}">${say}${body}${sources || graph ? `<div class="row">${sources}${graph}</div>` : ''}${by}${toMap}</div>`;
 }
 
 // ---------- нейросеть на сайте без коробки: онлайн по ключу из этого браузера или Ollama на компьютере ----------
@@ -652,9 +656,10 @@ function viewExplore(id) {
     <a class="btn" href="#/build/${esc(g.id)}">🧩 Собрать самому</a></div>
   ${x.showText ? `<div class="paragraph">${highlightEvidence(textOf(g), g)}</div>` : ''}
   <div class="explore ${x.fs ? 'fs' : ''}" id="explore">
-    <div class="graph-wrap" id="graph"></div>
+    <div class="ex-main"><div class="graph-wrap" id="graph"></div><div id="timeline"></div></div>
     <aside class="panel" id="panel" aria-label="Инспектор и шаги"></aside>
   </div>
+  <section class="debrief-card" id="debrief" aria-label="Разбор результатов с Совой"></section>
   <div class="legend"><span class="lg pos">▲ вызывает рост</span><span class="lg neg">▼ приводит к уменьшению</span><span class="lg idea">┄ моя идея</span><span>▲? твой прогноз</span>${loops.length ? `<span>Петель обратной связи: ${loops.length}</span>` : ''}<span class="muted">Схему можно двигать пальцем или мышью и приближать колёсиком или двумя пальцами.</span></div>`;
   drawExploreGraph();
   drawPanel();
@@ -740,34 +745,32 @@ function drawPanel() {
       ${x.tool === 'predict' && x.selected && !(x.selected in x.changes) ? `<div class="predict"><strong>${esc(nodeLabel(g, x.selected))}</strong>
         <div class="row">${['up', 'down', 'same'].map((t) => `<button class="btn ${x.predictions[x.selected] === t ? 'primary' : ''}" data-action="predict" data-t="${t}">${ARROW[t]} ${TREND_WORD[t]}</button>`).join('')}</div></div>` : ''}
       ${Object.keys(x.predictions).length ? `<ul class="changes">${Object.entries(x.predictions).map(([id, t]) => `<li>${ARROW[t]}? ${esc(nodeLabel(g, id))}</li>`).join('')}</ul>` : ''}
+      ${predictionFieldHTML(x)}
     </div>
-    <button class="btn primary wide" data-action="run" ${changed.length ? '' : 'disabled'}>▶ Запустить</button>`;
+    <button class="btn primary wide" data-action="run" ${changed.length ? '' : 'disabled'}>▶ Запустить и проверить прогноз</button>`;
   } else if (x.phase === 'running') {
     h += '<div class="step"><h3>Изменение идёт по цепочке…</h3><p class="muted">Следи за схемой: сначала меняются ближайшие факторы, потом дальние.</p></div>';
   } else {
-    const r = x.result;
-    const checks = checkPredictions(r, x.predictions);
-    const affected = Object.keys(r.total).filter((id) => !(id in x.changes) && trend(r.total[id]) !== 'same');
-    h += checks.length ? `<div class="step"><h3>Твой прогноз: ${checks.filter((c) => c.correct).length} из ${checks.length}</h3><ul class="checks">${checks.map((c) => `<li class="${c.correct ? 'ok' : 'bad'}">${c.correct ? '✓' : '✗'} ${esc(nodeLabel(g, c.node))}: ты думал «${TREND_WORD[c.guess]}», на схеме — ${TREND_PAST[c.actual]}</li>`).join('')}</ul></div>` : '';
-    const stepName = (i) => (i === 0 ? 'Сразу' : i === delays.length - 1 && delays.length > 2 ? 'Долгосрочный эффект' : delays[i].replace(/^./, (c) => c.toUpperCase()));
-    h += `<div class="step"><h3>🁢 Цепочка домино</h3><ol class="domino">${delays.map((label, i) => {
-      const items = affected.filter((id) => (r.when[id] ?? 0) === i).sort((a, b) => Math.abs(r.total[b]) - Math.abs(r.total[a]));
-      return `<li class="dcol"><span class="tlabel">Шаг ${i + 1} · ${esc(stepName(i))}${i && stepName(i) !== delays[i].replace(/^./, (c) => c.toUpperCase()) ? ` <span class="muted">(${esc(label)})</span>` : ''}</span>${items.map((id) => {
-        const via = r.via[id];
-        return `<button class="titem ${trend(r.total[id])}" data-action="why" data-id="${esc(id)}">${ARROW[trend(r.total[id])]} ${esc(nodeLabel(g, id))}${via ? `<span class="tvia">из-за: «${esc(nodeLabel(g, via.from))}» ${ARROW[trend(r.total[via.from] || x.changes[via.from] || 0)]}</span>` : ''}</button>`;
-      }).join('') || '<span class="muted small">—</span>'}</li>`;
-    }).join('')}</ol><p class="muted small">Нажми на последствие или на узел схемы, чтобы увидеть цепочку «почему» и цитаты.</p></div>`;
     if (x.info?.why) h += `<div class="info">${x.info.why}</div>`;
     const loops = findLoops(g);
     if (loops.length) h += `<div class="step"><h3>Петли обратной связи</h3><ul class="list">${loops.map((l) => `<li><strong>${l.type === 'reinforcing' ? 'Усиливающая' : 'Стабилизирующая'}:</strong> ${l.nodes.map((n) => esc(nodeLabel(g, n))).join(' → ')} → ${esc(nodeLabel(g, l.nodes[0]))}</li>`).join('')}</ul></div>`;
-    h += `<div class="step"><h3>🦉 Разбор с Совой</h3><p>${esc(localDebrief(g, r, checks)).replace(/\n/g, '<br>')}</p>
-      ${x.debrief ? `<div class="msg assistant"><div class="md">${renderMarkdown(x.debrief)}</div><span class="by">нейросеть</span></div>` : ''}
-      ${(S.server?.llm || browserAI()) && !x.debrief ? `<button class="btn" data-action="debrief" ${x.busy ? 'disabled' : ''}>${x.busy ? 'Сова думает…' : 'Обсудить с Совой подробнее'}</button>` : ''}
-      ${g.questions?.length ? `<p class="question"><strong>Подумай:</strong> ${esc(g.questions[0])}</p>` : ''}</div>
-      <button class="btn wide" data-action="reset">↺ Попробовать другое условие</button>`;
+    if (!x.info?.why) h += '<p class="muted small">Нажми на узел схемы или на шаг в «Цепочке домино» — здесь появится цепочка «почему» с цитатами. Разбор с Совой — под схемой.</p>';
+    h += '<button class="btn wide" data-action="reset">↺ Попробовать другое условие</button>';
   }
   h += ideaSectionHTML(S.ex.graphId, x.ideaOpen);
   panel.innerHTML = h;
+  drawResultArea();
+}
+
+/** Под схемой: цепочка домино и разбор с Совой (сама разметка — в simulation-ui.js). */
+function drawResultArea() {
+  const g = exGraph();
+  const tl = document.getElementById('timeline');
+  const db = document.getElementById('debrief');
+  if (tl) tl.innerHTML = timelineHTML(g, S.ex);
+  if (db) db.innerHTML = debriefCardHTML(g, S.ex);
+  const box = document.getElementById('debrief-messages');
+  if (box) box.scrollTop = box.scrollHeight;
 }
 
 function highlightEvidence(text, g) {
@@ -777,10 +780,6 @@ function highlightEvidence(text, g) {
     if (html.includes(eq)) html = html.replace(eq, `<mark>${eq}</mark>`);
   }
   return html;
-}
-
-function chainText(g, r, path) {
-  return path.map((e) => `«${nodeLabel(g, e.from)}» ${ARROW[trend(r.total[e.from])]} ${relationVerb(e)} «${nodeLabel(g, e.to)}» ${ARROW[trend(r.total[e.to])]} — «${e.evidence}»`).join(';\n');
 }
 
 function showWhy(id) {
@@ -797,26 +796,6 @@ function showWhy(id) {
   }
   drawExploreGraph();
   drawPanel();
-}
-
-function localDebrief(g, r, checks) {
-  const lines = [];
-  const wrong = checks.filter((c) => !c.correct);
-  if (checks.length) {
-    lines.push(wrong.length ? `Ты угадал ${checks.length - wrong.length} из ${checks.length}. Разберём, где схема повела себя иначе.` : 'Все прогнозы верны — отличное рассуждение!');
-    for (const c of wrong.slice(0, 2)) {
-      const p = pathTo(r, c.node);
-      lines.push(p.length ? `«${nodeLabel(g, c.node)}» ${TREND_PAST[c.actual]}: ${chainText(g, r, p)}.` : `«${nodeLabel(g, c.node)}» не изменился: изменение до него не дошло.`);
-    }
-  } else {
-    const top = Object.keys(r.total).filter((id) => !(id in S.ex.changes)).sort((a, b) => Math.abs(r.total[b]) - Math.abs(r.total[a]))[0];
-    if (top) lines.push(`Сильнее всего изменился фактор «${nodeLabel(g, top)}». Цепочка: ${chainText(g, r, pathTo(r, top))}.`);
-    lines.push('В следующий раз сначала сделай прогноз — так ты лучше проверишь своё понимание.');
-  }
-  const loops = findLoops(g).filter((l) => l.nodes.some((n) => n in r.total));
-  if (loops.length) lines.push(`Заметь петлю: ${loops[0].nodes.map((n) => nodeLabel(g, n)).join(' → ')} → ${nodeLabel(g, loops[0].nodes[0])}. Она ${loops[0].type === 'reinforcing' ? 'усиливает' : 'гасит'} начальное изменение.`);
-  lines.push('Помни: схема — упрощённая модель. Если не согласен со связью, нажми на стрелку и проверь цитату.');
-  return lines.join('\n');
 }
 
 /** «Своё условие»: «Что, если построили плотину…» → изменения узлов схемы. */
@@ -855,11 +834,11 @@ function runSimulation() {
   x.phase = 'running';
   x.info = null;
   x.highlight = null;
-  x.debrief = '';
   drawPanel();
   if (reduceMotion()) { // без анимации: сразу итог
     x.phase = 'done';
     drawExploreGraph(); drawPanel();
+    afterRun(g, x, drawResultArea);
     return;
   }
   let wave = 0;
@@ -875,38 +854,10 @@ function runSimulation() {
     if (wave++ < x.result.waves) setTimeout(step, 650);
     else setTimeout(() => {
       Object.assign(x, { anim: null, highlight: null, phase: 'done' });
-      if (S.ex === x && document.getElementById('graph')) { drawExploreGraph(); drawPanel(); }
+      if (S.ex === x && document.getElementById('graph')) { drawExploreGraph(); drawPanel(); afterRun(g, x, drawResultArea); }
     }, 650);
   };
   step();
-}
-
-async function debriefWithSova() {
-  const g = exGraph();
-  const x = S.ex;
-  x.busy = true;
-  drawPanel();
-  const r = x.result;
-  const effects = Object.keys(r.total).filter((id) => !(id in x.changes)).map((id) => ({ factor: nodeLabel(g, id), change: TREND_PAST[trend(r.total[id])], chain: chainText(g, r, pathTo(r, id)) }));
-  const context = {
-    schema: g.title,
-    changed: Object.entries(x.changes).map(([id, v]) => `${nodeLabel(g, id)}: ${sliderWord(Math.round(v * 100))}`),
-    predictions: checkPredictions(r, x.predictions).map((c) => ({ factor: nodeLabel(g, c.node), guess: TREND_WORD[c.guess], result: TREND_PAST[c.actual], correct: c.correct })),
-    effects,
-    loops: findLoops(g).map((l) => `${l.type === 'reinforcing' ? 'усиливающая' : 'стабилизирующая'}: ${l.nodes.map((n) => nodeLabel(g, n)).join(' → ')}`),
-  };
-  try {
-    if (S.server) {
-      const res = await postJSON('api/chat', { mode: 'debrief', context });
-      x.debrief = res.answer || 'Нейросеть сейчас недоступна.';
-    } else {
-      x.debrief = await browserAsk([{ role: 'system', content: DEBRIEF }, { role: 'user', content: JSON.stringify(context) }], () => {}, 400);
-    }
-  } catch (e) {
-    x.debrief = `Не получилось: ${e.message}`;
-  }
-  x.busy = false;
-  drawPanel();
 }
 
 // ---------- «Собери сам» ----------
@@ -962,6 +913,7 @@ function viewBuild(id) {
   if (!g) {
     app.innerHTML = `<h1>Собери сам</h1>
     <p class="muted">Читаешь параграф по одной фразе и отвечаешь на три вопроса: <strong>что причина</strong>, <strong>что следствие</strong> и <strong>как они связаны</strong>. Из твоих ответов шаг за шагом складывается схема причин и следствий. Потом её можно «запустить» во вкладке «Что будет, если…».</p>
+    <a class="card sandbox-entry" href="#/sandbox"><span class="icon">🧠</span><strong>Песочница — свободная карта мыслей</strong><span class="muted">Не только связи из параграфа: создавай свои факторы и стрелки («провоцирует», «тормозит», «является скрытой причиной»), пиши заметки, советуйся с Совой и отправляй работу учителю</span></a>
     ${graphCards('build')}`;
     return;
   }
@@ -1176,9 +1128,9 @@ function viewTeacher(tab) {
     return;
   }
   if (!t.summary) loadSummary();
-  const TABS = [['schemes', '🔀', 'Конструктор схем'], ['ai', '🤖', 'ИИ-помощник'], ['analytics', '📊', 'Аналитика класса'], ['settings', '⚙️', 'Настройки Коробки']];
+  const TABS = [['schemes', '🔀', 'Конструктор схем'], ['works', '📥', 'Работы учеников'], ['ai', '🤖', 'ИИ-помощник'], ['analytics', '📊', 'Аналитика класса'], ['settings', '⚙️', 'Настройки Коробки']];
   if (!TABS.some(([id]) => id === t.tab)) t.tab = 'schemes';
-  const panels = { schemes: teacherSchemesTab, ai: teacherAISection, analytics: teacherAnalyticsTab, settings: teacherSettingsTab };
+  const panels = { schemes: teacherSchemesTab, works: teacherWorksTab, ai: teacherAISection, analytics: teacherAnalyticsTab, settings: teacherSettingsTab };
   app.innerHTML = `
   <div class="ex-head"><h1>Кабинет учителя</h1><div class="row"><span class="badge on">✓ Режим учителя</span><button class="btn ghost" data-action="t-logout">Выйти</button></div></div>
   <nav class="tabs" role="tablist" aria-label="Разделы кабинета">
@@ -1409,6 +1361,12 @@ const actions = {
     const doc = document.getElementById('doc');
     showTTSNote(await speak(doc.innerText, el, { serverTTS: S.server?.tts }));
   },
+  'to-map': (d, el) => {
+    // выделенный в этом ответе фрагмент — или весь ответ Совы
+    const sel = window.getSelection?.();
+    const picked = sel && !sel.isCollapsed && el.closest('.msg')?.contains(sel.anchorNode) ? String(sel).trim() : '';
+    openToMap(picked || markdownToText(S.chat.messages[Number(d.i)].text));
+  },
   'speak-msg': async (d, el) => {
     const m = S.chat.messages[Number(d.i)];
     showTTSNote(await speak(markdownToText(m.text), el, { serverTTS: S.server?.tts }));
@@ -1481,7 +1439,7 @@ const actions = {
   run: runSimulation,
   why: (d) => showWhy(d.id),
   'close-info': () => { S.ex.info = null; S.ex.highlight = null; drawExploreGraph(); drawPanel(); },
-  debrief: debriefWithSova,
+  'debrief-q': (d) => askDebrief(exGraph(), S.ex, d.q, drawResultArea),
   reset: () => { const id = S.ex.graphId; S.ex = null; viewExplore(id); },
   'key-test': (d) => checkKey(d.p),
   'key-remove': (d) => saveKey(d.p, ''),
@@ -1546,7 +1504,8 @@ app.addEventListener('input', (ev) => {
     if (v === 0) delete S.ex.changes[S.ex.selected]; else S.ex.changes[S.ex.selected] = v / 100;
     document.getElementById('sw').textContent = sliderWord(v);
     drawExploreGraph();
-  } else if (a === 't-title') S.teacher.graph.title = ev.target.value;
+  } else if (a === 'text-prediction') S.ex.textPrediction = ev.target.value;
+  else if (a === 't-title') S.teacher.graph.title = ev.target.value;
   else if (a === 'lib-q') { S.lf.q = ev.target.value; renderLibList(location.hash.split('/')[2]); }
 });
 function showTTSNote(msg) {
@@ -1706,7 +1665,7 @@ function providerSection() {
       <div class="grow">
         <strong>${esc(p.name)} · ${esc(p.model)} (онлайн)</strong>
         ${p.hasKey
-          ? `<div class="row key-row"><span class="muted small">Ключ ${esc(p.masked)}${p.source === 'env' ? ' (из переменной окружения)' : box ? ' (сохранён на коробке)' : ' (сохранён в этом браузере)'}</span>
+          ? `<div class="row key-row"><span class="muted small">Ключ ${esc(p.masked)}${p.source === 'env' ? ' (из переменной окружения)' : box ? ' (сохранён на коробке)' : ' (только в этой вкладке — сотрётся при закрытии)'}</span>
              <button type="button" class="btn small" data-action="key-test" data-p="${esc(p.id)}" ${t?.busy ? 'disabled' : ''}>${t?.busy ? 'Проверяю…' : 'Проверить'}</button>
              ${p.source !== 'env' ? `<button type="button" class="btn ghost small" data-action="key-remove" data-p="${esc(p.id)}">Удалить ключ</button>` : ''}</div>`
           : `<form class="row key-row" data-form="key" data-p="${esc(p.id)}" autocomplete="off">
@@ -1722,7 +1681,7 @@ function providerSection() {
       ${list.map(card).join('')}
     </div>
     <p class="muted small">⚠ Онлайн-нейросети работают только с интернетом, и вопросы учеников уходят в сервис компании-разработчика. Если интернет пропадёт, ответит модель без интернета.
-    ${box ? 'Ключ хранится на коробке, в браузеры учеников он не попадает.' : 'Без коробки ключ хранится только в этом браузере: не сохраняйте его на общем компьютере класса.'}
+    ${box ? 'Ключ хранится на коробке, в браузеры учеников он не попадает.' : 'Без коробки ключ хранится только в этой вкладке браузера и стирается, когда её закрывают. В коде сайта ключей нет.'}
     Где взять ключ: Claude — console.anthropic.com, GPT — platform.openai.com, Gemini — aistudio.google.com.</p>
     ${S.teacher.providerError ? `<div class="info bad" role="alert">${esc(S.teacher.providerError)}</div>` : ''}
   </section>`;
@@ -1750,6 +1709,7 @@ app.addEventListener('submit', (ev) => {
   ev.preventDefault();
   const form = ev.target;
   if (form.dataset.form === 'scenario') interpretScenario(form.q.value);
+  if (form.dataset.form === 'debrief-q') { const v = form.q.value; form.q.value = ''; askDebrief(exGraph(), S.ex, v, drawResultArea); }
   if (form.dataset.form === 'idea') addIdea(form);
   if (form.dataset.form === 'chat') { const v = form.q.value; form.q.value = ''; sendChat(v); }
   if (form.dataset.form === 'pin-change') changePin(form);
@@ -1827,4 +1787,6 @@ if ('serviceWorker' in navigator && location.protocol !== 'file:') {
 window.addEventListener('online', renderOffline);
 window.addEventListener('offline', renderOffline);
 
+initSimulationUI({ S, esc, renderMarkdown, liveBubble, chatServer, browserAI, cachedBrowserAsk });
+initSandbox({ S, app, esc, store, renderMarkdown, renderGraph, postJSON, teacherPost, viewTeacher, logoutTeacher });
 boot().catch((e) => { app.innerHTML = `<div class="info bad">Не удалось загрузить приложение: ${esc(e.message)}. Откройте его через сервер (<code>python server/server.py</code>), а не как файл.</div>`; });

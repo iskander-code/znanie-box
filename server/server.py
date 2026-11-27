@@ -27,6 +27,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import llm  # noqa: E402
 from cache import AnswerCache  # noqa: E402
+from works import WorksStore  # noqa: E402
 import tts  # noqa: E402
 from graphs import extract, idea_feedback, parse_scenario  # noqa: E402
 from rag import Library, is_relevant  # noqa: E402
@@ -38,6 +39,7 @@ USER_GRAPHS = ROOT / "data" / "user_graphs"
 LIB = Library(WEB / "data" / "library")
 TEACHER = Teacher(ROOT / "data" / "state.json")
 CACHE = AnswerCache(ROOT / "data" / "cache.sqlite")
+WORKS = WorksStore(ROOT / "data" / "works.sqlite")
 MAX_BODY = 200_000
 EXAM_GENERAL = "Сейчас идёт контрольная: Сова помогает только подсказками по темам школьной библиотеки. Попробуй спросить про тему из учебника."
 
@@ -105,8 +107,41 @@ TEACHER_AI = (
 
 # Предел длины ответа в токенах: подсказка короткая, объяснение длиннее. Обычные ответы короче предела,
 # он лишь не даёт модели «заговориться» — на слабом устройстве это десятки секунд.
-MAX_TOKENS = {"hint": 160, "answer": 450, "general": 450, "debrief": 400, "teacher": 1500}
+MAX_TOKENS = {"hint": 160, "answer": 450, "general": 450, "debrief": 400, "teacher": 1500, "context": 500}
 MAX_CONTEXT = 1500  # в подсказку модели — не больше 1500 символов из библиотеки (3 самых подходящих фрагмента)
+# Проверка прогноза словами в «Что будет, если…»
+PREDICT_CHECK = (
+    "Ты — Сова, доброжелательный наставник школьника. Ученик написал своими словами прогноз, что изменится в "
+    "причинно-следственной цепочке, а потом запустил симуляцию. Тебе пришлют JSON: схему, что ученик изменил, "
+    "его прогноз словами, его отметки на узлах и фактические результаты с цепочками причин. Обращайся к ученику на «ты». Сравни прогноз с "
+    "результатами. Ответь по-русски, не больше 6 предложений, в Markdown: 1) **похвали** за верные догадки — "
+    "назови их; 2) мягко укажи, какое звено цепочки ученик упустил или перепутал, и объясни по цепочке из схемы; "
+    "3) закончи ОДНИМ уточняющим **вопросом**. Не выдумывай связей, которых нет в схеме."
+)
+# Совет по карте мыслей в «Песочнице»
+SANDBOX_HELP = (
+    "Ты — Сова, наставник школьника. Ученик сам строит карту мыслей: свои факторы, стрелки с подписями "
+    "(«провоцирует», «тормозит»…) и заметки с рассуждениями. Тебе пришлют JSON с картой и заметками. "
+    "Обращайся к ученику на «ты». Ответь по-русски, не больше 7 предложений, в Markdown: похвали удачную или неочевидную связь; найди 1–2 слабых "
+    "места (пропущенный промежуточный фактор, связь без объяснения, спорное направление); задай 1–2 наводящих "
+    "вопроса, которые помогут додумать. НЕ перестраивай схему за ученика и не давай готовый ответ."
+)
+# Разбор работы ученика для учителя
+WORK_REVIEW = (
+    "Ты — помощник учителя. Ученик прислал на проверку карту мыслей (факторы и подписанные связи) и заметки. "
+    "Тебе пришлют JSON. Ответь по-русски в Markdown, кратко, для учителя: **Сильные стороны** (2–3 пункта), "
+    "**Слабые места логики** (2–3 пункта: пропущенные звенья, спорные связи, утверждения без аргументов), "
+    "**Что спросить у ученика** (1–2 вопроса), **Ориентировочная оценка** по пятибалльной шкале с одной фразой "
+    "почему. Оценка — только подсказка, решение за учителем."
+)
+# Диалог под разбором симуляции
+DEBRIEF_CHAT = (
+    "Ты — Сова, наставник школьника. Ученик запустил симуляцию причинно-следственной схемы и задаёт уточняющий "
+    "вопрос о результатах. Тебе пришлют JSON с результатами и вопросом. Обращайся к ученику на «ты». Ответь по-русски, не больше 5 предложений, "
+    "опираясь только на связи и цитаты из схемы. Закончи коротким вопросом, который продолжит рассуждение."
+)
+CONTEXT_MODES = {"predict_check": PREDICT_CHECK, "sandbox_help": SANDBOX_HELP, "debrief_chat": DEBRIEF_CHAT}
+
 DEBRIEF = (
     "Ты — Сова, наставник школьника. Ученик сделал прогноз и запустил симуляцию причинно-следственной схемы. "
     "Разбери результат по-русски, не больше 7 предложений. Похвали верные догадки. Для каждой ошибки объясни "
@@ -240,6 +275,16 @@ class Handler(SimpleHTTPRequestHandler):
             if not self._teacher():
                 return self._denied()
             return self._json({"topics": TEACHER.summary(), "sims": TEACHER.sims_summary()})
+        if path == "/api/teacher/works":
+            if not self._teacher():
+                return self._denied()
+            return self._json({"works": WORKS.list()})
+        m = re.fullmatch(r"/api/teacher/works/(\d+)", path)
+        if m:
+            if not self._teacher():
+                return self._denied()
+            work = WORKS.get(int(m.group(1)))
+            return self._json(work) if work else self._json({"error": "Работа не найдена"}, HTTPStatus.NOT_FOUND)
         if path == "/api/sims":
             return self._json(teacher_sims())
         if path == "/api/graphs":
@@ -313,6 +358,28 @@ class Handler(SimpleHTTPRequestHandler):
                 if is_relevant(fr):
                     TEACHER.record(fr[0]["docId"], fr[0]["title"], "report")
                 return self._json({"ok": True})
+            if path == "/api/student-works":
+                # Ученик сдаёт карту мыслей и заметки — без входа, только имя или ник и тема.
+                try:
+                    wid = WORKS.add(body.get("name", ""), body.get("topic", ""), body.get("map") or {}, body.get("notes", ""))
+                except ValueError as e:
+                    return self._json({"error": str(e)}, HTTPStatus.BAD_REQUEST)
+                return self._json({"ok": True, "id": wid})
+            m = re.fullmatch(r"/api/teacher/works/(\d+)/(review|ai|delete)", path)
+            if m:
+                if not self._teacher():
+                    return self._denied()
+                wid, action = int(m.group(1)), m.group(2)
+                if action == "review":
+                    ok = WORKS.review(wid, body.get("comment", ""), body.get("grade", ""))
+                    return self._json({"ok": ok}) if ok else self._json({"error": "Работа не найдена"}, HTTPStatus.NOT_FOUND)
+                if action == "delete":
+                    return self._json({"ok": WORKS.delete(wid)})
+                work = WORKS.get(wid)
+                if not work:
+                    return self._json({"error": "Работа не найдена"}, HTTPStatus.NOT_FOUND)
+                context = {"тема": work["topic"], "карта": work["map"], "заметки": work["notes"]}
+                return self._context_answer(WORK_REVIEW, {"context": context}, bool(body.get("stream")))
             if path == "/api/idea":
                 # «Проверить мою идею с Совой»: разбор идеи ученика нейросетью (без нейросети — разбор в браузере).
                 if not llm.available():
@@ -390,8 +457,22 @@ class Handler(SimpleHTTPRequestHandler):
                 "online": llm.online.status(), "model": llm.label(), "llm": llm.available(), "localModel": llm.model(),
                 "cache": CACHE.stats()}
 
+    def _context_answer(self, system: str, body: dict, stream: bool):
+        """Ответ по присланному контексту (схема, прогноз, карта мыслей) — по мере печати и с кэшем."""
+        if not llm.available():
+            return self._json({"answer": None, "llm": False})
+        history = [{"role": m["role"], "content": str(m.get("content", ""))[:2000]}
+                   for m in body.get("history", [])[-6:] if m.get("role") in ("user", "assistant")]
+        context = json.dumps(body.get("context", {}), ensure_ascii=False)[:8000]
+        question = str(body.get("message", "")).strip()[:1000]
+        msgs = [{"role": "system", "content": system}, *history,
+                {"role": "user", "content": context + (f"\n\nВопрос ученика: {question}" if question else "")}]
+        return self._answer({"llm": True, "model": llm.label()}, msgs, MAX_TOKENS["context"], False, stream, cache=True)
+
     def _chat(self, body: dict):
         mode = body.get("mode", "socratic")
+        if mode in CONTEXT_MODES:
+            return self._context_answer(CONTEXT_MODES[mode], body, bool(body.get("stream")))
         if mode == "debrief":
             if not llm.available():
                 return self._json({"answer": None, "llm": False})

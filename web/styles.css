@@ -519,3 +519,44 @@ body.ex-fs { overflow: hidden; }
 .idea-link span { font-size: .9rem; color: var(--muted); }
 @media (max-width: 640px) { .idea-link { grid-template-columns: 1fr; } }
 :root[data-theme="a11y"] .edge.idea .edge-line, :root[data-theme="a11y"] .node.idea rect { stroke: #CC79A7; }
+
+/* «Что будет, если…»: схема ~70% + инспектор ~30%, разбор с Совой — во всю ширину под схемой */
+@media (min-width: 1024px) { .explore:not(.fs) { grid-template-columns: minmax(0, 7fr) minmax(300px, 3fr); } }
+.ex-main { display: grid; gap: 12px; min-width: 0; }
+.explore.fs .ex-main { gap: 0; }
+.explore.fs #timeline { display: none; }
+.timeline-card { margin: 0; }
+.debrief-card { margin-top: 16px; background: var(--surface); border: var(--border) solid var(--line); border-radius: var(--radius); padding: 16px; }
+.debrief-card h2 { margin: 0 0 10px; font-size: 1.2rem; }
+.debrief-card h3 { font-size: 1rem; margin: 10px 0 6px; }
+.debrief-grid { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1.2fr); gap: 20px; align-items: start; }
+.debrief-chat .messages { max-height: 420px; min-height: 120px; }
+.quick-q { margin: 8px 0; }
+.debrief-chat .composer { position: static; background: none; }
+.local-debrief p { margin: 0 0 8px; }
+.text-predict { display: grid; gap: 4px; margin-top: 10px; font-weight: 600; }
+.text-predict textarea { min-height: calc(var(--tap) * 1.6); padding: 8px 10px; font: inherit; font-weight: 400; border-radius: 8px; border: var(--border) solid var(--line); background: var(--surface); color: var(--ink); resize: vertical; }
+@media (max-width: 900px) { .debrief-grid { grid-template-columns: 1fr; } }
+
+/* ---------- Песочница: карта мыслей ---------- */
+.sb-title { display: grid; gap: 4px; font-weight: 600; margin: 4px 0 12px; }
+.sb-title input, .sb-form input, .sb-form select, .sb-form textarea, .sb-notes, .sb-send-form input, .review-form textarea, .review-form input, .to-map input, .to-map textarea { min-height: var(--tap); padding: 6px 10px; font: inherit; border-radius: 8px; border: var(--border) solid var(--line); background: var(--surface); color: var(--ink); min-width: 0; width: 100%; }
+.sandbox { display: grid; grid-template-columns: minmax(0, 7fr) minmax(280px, 3fr); gap: 16px; align-items: start; }
+.sb-main, .sb-side { display: grid; gap: 12px; min-width: 0; }
+.sb-empty { display: grid; place-items: center; min-height: 260px; padding: 20px; text-align: center; color: var(--muted); }
+.sb-form { display: grid; gap: 8px; }
+.sb-form h3 { margin: 0; }
+.sb-notes { resize: vertical; line-height: 1.6; }
+.sb-send-form { display: grid; grid-template-columns: 1fr 1.5fr auto; gap: 10px; align-items: end; }
+.sb-send-form label, .review-form label, .to-map label { display: grid; gap: 4px; font-weight: 600; }
+.sandbox-entry { margin: 8px 0 16px; border-color: var(--accent); }
+.to-map-btn { display: block; margin-top: 8px; font: inherit; font-size: .82rem; min-height: 36px; padding: 4px 12px; border-radius: 999px; border: 1px dashed var(--accent); background: transparent; color: var(--accent); cursor: pointer; }
+.to-map-btn:hover { background: var(--accent-soft); }
+.to-map { gap: 12px; }
+.seg-radio { border: 0; padding: 0; margin: 0; display: flex; gap: 14px; flex-wrap: wrap; }
+.seg-radio label { display: inline-flex; align-items: center; gap: 6px; font-weight: 600; min-height: var(--tap); }
+.work-card { text-align: left; font: inherit; color: inherit; cursor: pointer; }
+.review-form { display: grid; gap: 10px; margin-top: 12px; }
+#work-ai:empty { display: none; }
+@media (min-width: 761px) { .tabs { grid-template-columns: repeat(5, minmax(0, 1fr)); } }
+@media (max-width: 900px) { .sandbox { grid-template-columns: 1fr; } .sb-send-form { grid-template-columns: 1fr; } }

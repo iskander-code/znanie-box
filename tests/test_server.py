@@ -150,6 +150,8 @@ class ServerTest(unittest.TestCase):
         server.TEACHER = Teacher(Path(cls.tmp.name) / "state.json")
         from cache import AnswerCache
         server.CACHE = AnswerCache(Path(cls.tmp.name) / "cache.sqlite")
+        from works import WorksStore
+        server.WORKS = WorksStore(Path(cls.tmp.name) / "works.sqlite")
         cls.httpd = ThreadingHTTPServer(("127.0.0.1", 0), partial(server.Handler, directory=str(server.WEB)))
         cls.base = f"http://127.0.0.1:{cls.httpd.server_address[1]}"
         threading.Thread(target=cls.httpd.serve_forever, daemon=True).start()
@@ -345,6 +347,55 @@ class ServerTest(unittest.TestCase):
         self.assertEqual(len(mine), 1)
         self.assertEqual(mine[0]["title"], "Закон Гука", "название из <title> файла PhET")
         self.assertFalse(any(x["src"] == "sims/ohm-law.html" for x in sims), "свои симуляторы уже в каталоге")
+
+    def test_predict_check_streams_and_caches(self):
+        from unittest import mock
+        llm = self.server.llm
+        calls = []
+
+        def fake_stream(msgs, max_tokens=None):
+            calls.append(msgs)
+            yield from ["**Верно** про уровень моря. ", "А что с рыбой?"]
+
+        body = {"mode": "predict_check", "context": {"схема": "Арал", "прогноз_словами": "море обмелеет"}}
+        with mock.patch.object(llm, "model", return_value="fake-predict"), mock.patch.object(llm, "chat_stream", fake_stream):
+            _, first = self.stream(body)
+            _, second = self.stream(body)
+        self.assertEqual(first[-1]["answer"], "**Верно** про уровень моря. А что с рыбой?")
+        self.assertTrue(second[-1].get("cached"), "повторная проверка — из кэша")
+        self.assertEqual(len(calls), 1)
+        self.assertIn("Сравни прогноз с результатами", calls[0][0]["content"])
+        self.assertIn("море обмелеет", calls[0][-1]["content"])
+
+    def test_student_works_flow(self):
+        from unittest import mock
+        work = {"name": "Айгерим", "topic": "Почему высохло Аральское море",
+                "map": {"nodes": [{"id": "a", "label": "Хлопок"}, {"id": "b", "label": "Забор воды"}, {"id": "a", "label": "дубль"}],
+                        "edges": [{"from": "a", "to": "b", "sign": 1, "label": "провоцирует"}, {"from": "a", "to": "zz"}]},
+                "notes": "Хлопку нужно много воды."}
+        self.assertEqual(self.status("/api/student-works", {"name": "", "topic": "x", "map": {}, "notes": "a"}), 400)
+        wid = self.post("/api/student-works", work)["id"]
+        req = urllib.request.Request(self.base + "/api/teacher/works")
+        with self.assertRaises(urllib.error.HTTPError):
+            urllib.request.urlopen(req, timeout=10)  # без PIN работ не видно
+        token = self.post("/api/teacher/login", {"pin": "2026"})["token"]
+        get = lambda path: json.loads(urllib.request.urlopen(urllib.request.Request(self.base + path, headers={"X-Teacher-Token": token}), timeout=10).read())
+        listed = get("/api/teacher/works")["works"]
+        self.assertEqual((listed[0]["id"], listed[0]["nodes"], listed[0]["edges"], listed[0]["reviewed"]), (wid, 2, 1, False))
+        full = get(f"/api/teacher/works/{wid}")
+        self.assertEqual(full["map"]["edges"], [{"from": "a", "to": "b", "sign": 1, "label": "провоцирует"}], "мусорные связи и дубли отброшены")
+        llm = self.server.llm
+        seen = []
+        with mock.patch.object(llm, "model", return_value="fake-works"),                 mock.patch.object(llm, "chat_stream", lambda msgs, max_tokens=None: (seen.append(msgs), iter(["**Сильные стороны**: связь хлопка и воды."]))[1]):
+            req = urllib.request.Request(self.base + f"/api/teacher/works/{wid}/ai", data=json.dumps({"stream": True}).encode(),
+                                         headers={"Content-Type": "application/json", "X-Teacher-Token": token})
+            with urllib.request.urlopen(req, timeout=30) as r:
+                lines = [json.loads(x) for x in r if x.strip()]
+        self.assertIn("Сильные стороны", lines[-1]["answer"])
+        self.assertIn("Хлопку нужно много воды", seen[0][-1]["content"], "ИИ получает заметки ученика")
+        self.assertTrue(self.post(f"/api/teacher/works/{wid}/review", {"comment": "Хорошо!", "grade": "5"}, token)["ok"])
+        self.assertEqual((get(f"/api/teacher/works/{wid}")["grade"], get("/api/teacher/works")["works"][0]["reviewed"]), ("5", True))
+        self.assertTrue(self.post(f"/api/teacher/works/{wid}/delete", {}, token)["ok"])
 
     def test_context_from_library_is_capped(self):
         long = [{"title": f"Тема {i}", "text": "слово " * 400} for i in range(3)]

@@ -1,5 +1,6 @@
 // Онлайн-нейросети по ключу на сайте без коробки (например, GitHub Pages).
-// Ключ хранится только в этом браузере (localStorage) и уходит напрямую в сервис компании-разработчика.
+// Ключ хранится только в этой вкладке браузера (sessionStorage — стирается, когда вкладку закрыли) и уходит
+// напрямую в сервис компании-разработчика. В коде ключей нет.
 // С коробкой ключ хранится на сервере (server/online.py), а этот модуль не используется.
 
 export const PROVIDERS = {
@@ -10,9 +11,16 @@ export const PROVIDERS = {
 const MAX_TOKENS = 4096;
 
 const LS = {
-  get(k, d) { try { return JSON.parse(localStorage.getItem(k)) ?? d; } catch { return d; } },
-  set(k, v) { try { localStorage.setItem(k, JSON.stringify(v)); } catch { /* приватный режим */ } },
+  get(k, d) { try { return JSON.parse(sessionStorage.getItem(k)) ?? d; } catch { return d; } },
+  set(k, v) { try { sessionStorage.setItem(k, JSON.stringify(v)); } catch { /* приватный режим */ } },
 };
+// Ключи, сохранённые старой версией в localStorage, убираем оттуда (переносим в эту вкладку).
+try {
+  for (const k of ['online-keys', 'online-provider']) {
+    const old = localStorage.getItem(k);
+    if (old !== null) { if (sessionStorage.getItem(k) === null) sessionStorage.setItem(k, old); localStorage.removeItem(k); }
+  }
+} catch { /* приватный режим */ }
 
 const keys = () => LS.get('online-keys', {});
 export const keyOf = (pid) => keys()[pid] || '';

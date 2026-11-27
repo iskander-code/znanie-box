@@ -131,3 +131,60 @@ export function checkQuiz(quiz, reply) {
     ? `Верно! Правильное слово — «${quiz.answer}». Можешь объяснить, почему именно оно?`
     : `Пока не то. Правильный ответ — «${quiz.answer}». Полное предложение: «${quiz.question.replace('_____', quiz.answer)}»`;
 }
+
+// ---------- проверка прогноза словами без нейросети («Что будет, если…») ----------
+const UP_WORDS = /^(вырас|выраст|увелич|больш|рост|подним|подним|усил|повыс|прибав|расш|ускор|улучш|станет больше|прибыв)/;
+const DOWN_WORDS = /^(упад|упаде|уменьш|меньш|сократ|погиб|исчез|умр|сниз|нечег|пересох|обмел|высох|ослаб|разруш|пропад|сокращ|ухудш|паден|снижен|гибел)/;
+const wordStem = (w) => w.slice(0, Math.max(4, Math.min(5, w.length - 2)));
+
+/**
+ * Сравнивает прогноз ученика, написанный словами, с результатом симуляции.
+ * graph — схема, total — {узел: изменение}, changes — что ученик изменил сам,
+ * chain(id) — цепочка «почему» для узла (строка). Возвращает разбор в Markdown.
+ */
+export function checkPredictionText(text, graph, total, changes, chain = () => '') {
+  const words = (String(text).toLowerCase().replace(/ё/g, 'е').match(/[а-яa-z0-9]+/g) || []);
+  const trendOf = (id) => ((total[id] || 0) > 0.05 ? 'up' : (total[id] || 0) < -0.05 ? 'down' : 'same');
+  const found = [];
+  const used = new Set();
+  for (const n of graph.nodes) {
+    if (n.id in changes) continue;
+    const ns = new Set((n.label.toLowerCase().replace(/ё/g, 'е').match(/[а-яa-z0-9]+/g) || []).filter((w) => w.length > 3).map(wordStem));
+    const hit = words.findIndex((w, i) => !used.has(i) && w.length > 3 && ns.has(wordStem(w)));
+    if (hit < 0) continue;
+    used.add(hit);
+    // направление — ближайшее слово «вырастет / упадёт / погибнут…» в окне вокруг названия фактора
+    let dir = null;
+    for (let d = 1; d <= 4 && !dir; d++) {
+      for (const j of [hit + d, hit - d]) {
+        const w = words[j];
+        if (!w || dir) continue;
+        if (DOWN_WORDS.test(w)) dir = 'down';
+        else if (UP_WORDS.test(w)) dir = 'up';
+      }
+    }
+    found.push({ id: n.id, label: n.label, dir, actual: trendOf(n.id) });
+  }
+  const label = (id) => graph.nodes.find((n) => n.id === id)?.label || id;
+  const right = found.filter((f) => f.dir && f.dir === f.actual);
+  const wrong = found.filter((f) => f.dir && f.actual !== 'same' && f.dir !== f.actual);
+  const still = found.filter((f) => f.dir && f.actual === 'same');
+  const word = { up: 'растёт', down: 'уменьшается', same: 'не меняется' };
+  const changed = Object.keys(total).filter((id) => !(id in changes) && trendOf(id) !== 'same')
+    .sort((a, b) => Math.abs(total[b]) - Math.abs(total[a]));
+  const missed = changed.filter((id) => !found.some((f) => f.id === id));
+  const out = [];
+  if (!found.length) {
+    out.push('Я не нашла в твоём прогнозе названий факторов из схемы. Попробуй написать так: «*уровень моря упадёт, потому что…*» — тогда я смогу сравнить прогноз с результатом.');
+  } else {
+    if (right.length) out.push(`**Верно!** Ты правильно предсказал: ${right.map((f) => `${f.dir === 'up' ? '▲' : '▼'} «${f.label}»`).join(', ')}.`);
+    for (const f of wrong.slice(0, 2)) out.push(`**Посмотри ещё раз:** «${f.label}» на схеме ${word[f.actual]}, а ты думал, что ${f.dir === 'up' ? 'вырастет' : 'уменьшится'}. ${chain(f.id) ? `Цепочка: ${chain(f.id)}.` : ''}`);
+    for (const f of still.slice(0, 1)) out.push(`«${f.label}» по схеме не меняется: изменение до него не дошло или оказалось слишком слабым.`);
+    const noDir = found.filter((f) => !f.dir);
+    if (noDir.length) out.push(`Ты упомянул ${noDir.map((f) => `«${f.label}»`).join(', ')}, но не написал, вырастет это или уменьшится.`);
+  }
+  if (missed.length) out.push(`**Ты не упомянул:** ${missed.slice(0, 3).map((id) => `${trendOf(id) === 'up' ? '▲' : '▼'} «${label(id)}»`).join(', ')}.`);
+  const ask = missed[0] || wrong[0]?.id;
+  out.push(ask ? `**Вопрос:** почему, по-твоему, меняется «${label(ask)}», хотя ты его не трогал?` : '**Вопрос:** какое звено цепочки здесь самое важное — и что будет, если его убрать?');
+  return out.join('\n\n');
+}
