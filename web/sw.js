@@ -1,6 +1,6 @@
 // Офлайн-режим: после первого открытия сайт целиком хранится на устройстве
 // и работает без интернета. Список файлов проверяется тестом (tests/engine.test.mjs).
-const VERSION = 'znanie-v8';
+const VERSION = 'znanie-v9';
 // Опыты PhET (≈95 МБ) не скачиваются заранее: каждый сохраняется при первом открытии
 // или по кнопке «Сохранить все опыты». Их кэш не очищается при обновлении сайта.
 const PHET = 'znanie-phet';
@@ -47,7 +47,9 @@ self.addEventListener('activate', (event) => {
   );
 });
 
-// Сначала отдаём сохранённую копию (мгновенно и без интернета), в фоне обновляем её.
+// Сначала пробуем свежую версию с сервера: после обновления сайта все сразу видят новое.
+// Нет сети или сервер долго не отвечает (слабая раздача) — отдаём сохранённую копию, сайт работает без интернета.
+const NETWORK_TIMEOUT = 3000;
 self.addEventListener('fetch', (event) => {
   const req = event.request;
   const url = new URL(req.url);
@@ -70,13 +72,24 @@ self.addEventListener('fetch', (event) => {
   }
   event.respondWith((async () => {
     const cache = await caches.open(VERSION);
-    const cached = await cache.match(req, { ignoreSearch: true })
+    const fromCache = async () => (await cache.match(req, { ignoreSearch: true }))
       || (req.mode === 'navigate' ? await cache.match('index.html') : undefined);
-    const fresh = fetch(req).then((res) => {
+    const network = fetch(req).then((res) => {
       if (res.ok) cache.put(req, res.clone());
       return res;
-    }).catch(() => undefined);
-    if (cached) { event.waitUntil(fresh); return cached; }
-    return (await fresh) || new Response('Нет сохранённой копии этой страницы', { status: 503, headers: { 'Content-Type': 'text/plain; charset=utf-8' } });
+    });
+    let timer;
+    const slow = new Promise((resolve) => { timer = setTimeout(resolve, NETWORK_TIMEOUT); });
+    try {
+      const res = await Promise.race([network, slow.then(() => undefined)]);
+      if (res) return res;
+      const cached = await fromCache(); // сеть медленная: показываем копию, а свежая версия сохранится в фоне
+      if (cached) { event.waitUntil(network.catch(() => {})); return cached; }
+      return await network;
+    } catch {
+      return (await fromCache()) || new Response('Нет сохранённой копии этой страницы', { status: 503, headers: { 'Content-Type': 'text/plain; charset=utf-8' } });
+    } finally {
+      clearTimeout(timer);
+    }
   })());
 });

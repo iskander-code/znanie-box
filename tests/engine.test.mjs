@@ -192,3 +192,33 @@ test('офлайн-кэш: опыты PhET сохраняются при пер�
   await done;
   assert.ok(stores.has('znanie-phet') && !stores.has('znanie-old'), 'при обновлении сайта старый кэш удаляется, опыты остаются');
 });
+
+test('офлайн-кэш: при наличии сети — свежая версия сайта, без сети — сохранённая копия', async () => {
+  const code = readFileSync(new URL('../web/sw.js', import.meta.url), 'utf8');
+  const stores = new Map();
+  const cacheOf = (name) => {
+    if (!stores.has(name)) stores.set(name, new Map());
+    const m = stores.get(name);
+    const key = (r) => new URL(typeof r === 'string' ? r : r.url, 'http://box/').pathname;
+    return { match: async (r) => m.get(key(r))?.clone(), put: async (r, res) => { m.set(key(r), res); }, addAll: async () => {} };
+  };
+  const handlers = {};
+  let version = 'старая';
+  let online = true;
+  const env = {
+    self: { location: { origin: 'http://box' }, addEventListener: (t, f) => { handlers[t] = f; }, skipWaiting() {}, clients: { claim: async () => {} } },
+    caches: { open: async (n) => cacheOf(n), keys: async () => [...stores.keys()], delete: async (n) => stores.delete(n) },
+    fetch: async () => { if (!online) throw new Error('offline'); return new Response(`app ${version}`, { status: 200 }); },
+  };
+  new Function('self', 'caches', 'fetch', code)(env.self, env.caches, env.fetch);
+  const get = async (url) => {
+    let p;
+    handlers.fetch({ request: { url, method: 'GET', mode: 'cors' }, respondWith: (x) => { p = x; }, waitUntil() {} });
+    return (await p).text();
+  };
+  assert.equal(await get('http://box/js/app.js'), 'app старая');
+  version = 'новая';
+  assert.equal(await get('http://box/js/app.js'), 'app новая', 'после обновления сразу новая версия');
+  online = false;
+  assert.equal(await get('http://box/js/app.js?v=2'), 'app новая', 'без сети — последняя сохранённая копия');
+});

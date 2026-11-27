@@ -1346,6 +1346,12 @@ function renderOffline() {
   el.hidden = true;
 }
 if ('serviceWorker' in navigator && location.protocol !== 'file:') {
+  // Вышла новая версия сайта: старая копия на устройстве заменилась — один раз перезагружаем страницу.
+  const hadController = !!navigator.serviceWorker.controller;
+  let reloaded = false;
+  navigator.serviceWorker.addEventListener('controllerchange', () => {
+    if (hadController && !reloaded) { reloaded = true; location.reload(); }
+  });
   navigator.serviceWorker.register('sw.js').then(() => navigator.serviceWorker.ready).then(() => { S.offlineReady = true; renderOffline(); }).catch(() => { /* офлайн-режим недоступен */ });
 }
 window.addEventListener('online', renderOffline);
