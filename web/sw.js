@@ -1,6 +1,6 @@
 // Офлайн-режим: после первого открытия сайт целиком хранится на устройстве
 // и работает без интернета. Список файлов проверяется тестом (tests/engine.test.mjs).
-const VERSION = 'znanie-v10';
+const VERSION = 'znanie-v13';
 // Опыты PhET (≈95 МБ) не скачиваются заранее: каждый сохраняется при первом открытии
 // или по кнопке «Сохранить все опыты». Их кэш не очищается при обновлении сайта.
 const PHET = 'znanie-phet';
@@ -27,13 +27,17 @@ const FILES = [
   'js/app.js',
   'js/engine.js',
   'js/graph-view.js',
+  'js/ideas.js',
   'js/llm-browser.js',
+  'js/doc-structure.js',
   'js/markdown.js',
   'js/online-browser.js',
   'js/qr.js',
   'js/teacher.js',
   'js/tutor-local.js',
   'manifest.webmanifest',
+  'sims/greenhouse.html',
+  'sims/ohm-law.html',
   'styles.css'
 ];
 
@@ -75,7 +79,9 @@ self.addEventListener('fetch', (event) => {
     const cache = await caches.open(VERSION);
     const fromCache = async () => (await cache.match(req, { ignoreSearch: true }))
       || (req.mode === 'navigate' ? await cache.match('index.html') : undefined);
-    const network = fetch(req).then((res) => {
+    // cache: 'no-cache' — сверяемся с сервером, а не берём файл из обычного кэша браузера: иначе после
+    // обновления сайта новый app.js мог встретиться со старым graph-view.js (GitHub Pages разрешает кэш на 10 минут).
+    const network = (req.mode === 'navigate' ? fetch(req) : fetch(req.url, { cache: 'no-cache', credentials: 'same-origin' })).then((res) => {
       if (res.ok) cache.put(req, res.clone());
       return res;
     });

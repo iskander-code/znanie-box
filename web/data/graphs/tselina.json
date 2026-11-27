@@ -1,30 +1,140 @@
 {
-  "id": "tselina", "title": "Освоение целинных земель", "subject": "История Казахстана", "grade": 9, "text": "h082",
-  "source": "Тема «Освоение целинных земель»", "verified_by_teacher": true,
-  "delayLabels": ["сразу", "через годы", "через десятилетия"],
+  "id": "tselina",
+  "title": "Освоение целинных земель",
+  "subject": "История Казахстана",
+  "grade": 9,
+  "text": "h082",
+  "source": "Тема «Освоение целинных земель»",
+  "verified_by_teacher": true,
+  "delayLabels": [
+    "сразу",
+    "через годы",
+    "через десятилетия"
+  ],
   "nodes": [
-    {"id": "plow", "label": "Площадь распаханной степи", "adjustable": true},
-    {"id": "sown", "label": "Площадь посевов"},
-    {"id": "grain", "label": "Сбор зерна"},
-    {"id": "migrants", "label": "Приезд работников на целину"},
-    {"id": "share", "label": "Доля приезжего населения на севере"},
-    {"id": "erosion", "label": "Ветровая эрозия почвы"},
-    {"id": "soil", "label": "Плодородный слой почвы"},
-    {"id": "protect", "label": "Почвозащитное земледелие", "adjustable": true}
+    {
+      "id": "plow",
+      "label": "Площадь распаханной степи",
+      "adjustable": true
+    },
+    {
+      "id": "sown",
+      "label": "Площадь посевов"
+    },
+    {
+      "id": "grain",
+      "label": "Сбор зерна"
+    },
+    {
+      "id": "migrants",
+      "label": "Приезд работников на целину"
+    },
+    {
+      "id": "share",
+      "label": "Доля приезжего населения на севере"
+    },
+    {
+      "id": "erosion",
+      "label": "Ветровая эрозия почвы"
+    },
+    {
+      "id": "soil",
+      "label": "Плодородный слой почвы"
+    },
+    {
+      "id": "protect",
+      "label": "Почвозащитное земледелие",
+      "adjustable": true
+    }
   ],
   "edges": [
-    {"from": "plow", "to": "sown", "sign": 1, "strength": 3, "delay": 0, "evidence": "Распашка степи резко увеличила площадь посевов"},
-    {"from": "sown", "to": "grain", "sign": 1, "strength": 3, "delay": 0, "evidence": "сбор зерна в республике сильно вырос"},
-    {"from": "plow", "to": "migrants", "sign": 1, "strength": 2, "delay": 0, "evidence": "Для работы на целину приехали сотни тысяч людей из других республик"},
-    {"from": "migrants", "to": "share", "sign": 1, "strength": 3, "delay": 1, "evidence": "поэтому доля приезжего населения на севере увеличилась"},
-    {"from": "plow", "to": "erosion", "sign": 1, "strength": 2, "delay": 1, "evidence": "Распашка степи без защиты почвы вызвала ветровую эрозию"},
-    {"from": "erosion", "to": "soil", "sign": -1, "strength": 3, "delay": 1, "evidence": "пыльные бури уничтожали плодородный слой"},
-    {"from": "erosion", "to": "grain", "sign": -1, "strength": 2, "delay": 1, "evidence": "Эрозия почвы снижала урожаи"},
-    {"from": "protect", "to": "erosion", "sign": -1, "strength": 3, "delay": 1, "evidence": "почвозащитную систему земледелия с безотвальной вспашкой, которая уменьшала эрозию"}
+    {
+      "from": "plow",
+      "to": "sown",
+      "sign": 1,
+      "strength": 3,
+      "delay": 0,
+      "evidence": "Распашка степи резко увеличила площадь посевов",
+      "verb": "увеличивает"
+    },
+    {
+      "from": "sown",
+      "to": "grain",
+      "sign": 1,
+      "strength": 3,
+      "delay": 0,
+      "evidence": "сбор зерна в республике сильно вырос",
+      "verb": "даёт больше зерна"
+    },
+    {
+      "from": "plow",
+      "to": "migrants",
+      "sign": 1,
+      "strength": 2,
+      "delay": 0,
+      "evidence": "Для работы на целину приехали сотни тысяч людей из других республик",
+      "verb": "привлекает"
+    },
+    {
+      "from": "migrants",
+      "to": "share",
+      "sign": 1,
+      "strength": 3,
+      "delay": 1,
+      "evidence": "поэтому доля приезжего населения на севере увеличилась",
+      "verb": "меняет состав населения"
+    },
+    {
+      "from": "plow",
+      "to": "erosion",
+      "sign": 1,
+      "strength": 2,
+      "delay": 1,
+      "evidence": "Распашка степи без защиты почвы вызвала ветровую эрозию",
+      "verb": "ускоряет"
+    },
+    {
+      "from": "erosion",
+      "to": "soil",
+      "sign": -1,
+      "strength": 3,
+      "delay": 1,
+      "evidence": "пыльные бури уничтожали плодородный слой",
+      "verb": "разрушает"
+    },
+    {
+      "from": "erosion",
+      "to": "grain",
+      "sign": -1,
+      "strength": 2,
+      "delay": 1,
+      "evidence": "Эрозия почвы снижала урожаи",
+      "verb": "снижает урожай"
+    },
+    {
+      "from": "protect",
+      "to": "erosion",
+      "sign": -1,
+      "strength": 3,
+      "delay": 1,
+      "evidence": "почвозащитную систему земледелия с безотвальной вспашкой, которая уменьшала эрозию",
+      "verb": "останавливает"
+    }
   ],
   "scenarios": [
-    {"label": "Распахали ещё больше степи", "changes": {"plow": 0.8}},
-    {"label": "Сразу ввели почвозащитное земледелие", "changes": {"plow": 0.8, "protect": 0.8}}
+    {
+      "label": "Распахали ещё больше степи",
+      "changes": {
+        "plow": 0.8
+      }
+    },
+    {
+      "label": "Сразу ввели почвозащитное земледелие",
+      "changes": {
+        "plow": 0.8,
+        "protect": 0.8
+      }
+    }
   ],
   "questions": [
     "Почему через несколько лет после начала освоения целины урожаи в некоторые годы стали падать? Найди цепочку на схеме.",

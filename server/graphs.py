@@ -220,6 +220,37 @@ def validate(raw: dict, text: str) -> tuple[dict, list[str]]:
     return graph, notes
 
 
+IDEA_PROMPT = "Ты — Сова, доброжелательный наставник школьника. Ученик придумал свою идею (новый фактор или решение) для причинно-следственной схемы и соединил её стрелками с факторами схемы. Тебе пришлют JSON: схему, идею, связи, гипотезу ученика и последствия, которые посчитала модель. Ответь по-русски, не больше 6 предложений, в Markdown: 1) **похвали** за конкретный удачный или нестандартный ход; 2) оцени логику связей — верно ли направление «рост / уменьшение» и почему; 3) назови 1–2 возможных **побочных эффекта** или условия, при которых идея не сработает; 4) закончи ОДНИМ наводящим **вопросом**. Не ставь оценку «верно/неверно» и не пиши готовое решение за ученика."
+
+SCENARIO_PROMPT = """Ученик пишет своё условие для причинно-следственной схемы «{title}»: «{text}».
+Факторы схемы (id — название):
+{nodes}
+Определи, какие факторы схемы меняются по этому условию и в какую сторону. Ответь ТОЛЬКО JSON без пояснений:
+{{"changes": [{{"id": "id фактора", "direction": 1 или -1, "strength": от 0.3 до 1}}], "note": "одно короткое предложение для ученика"}}
+Если условие не про факторы схемы — верни {{"changes": [], "note": "..."}}."""
+
+
+def idea_feedback(payload: dict) -> str:
+    """Разбор идеи ученика нейросетью: похвала, логика связей, побочные эффекты, наводящий вопрос."""
+    data = json.dumps({k: payload.get(k) for k in ("graph", "idea", "effects")}, ensure_ascii=False)[:6000]
+    return llm.ask([{"role": "system", "content": IDEA_PROMPT}, {"role": "user", "content": data}], max_tokens=500)
+
+
+def parse_scenario(graph: dict, text: str) -> dict:
+    """Своё условие ученика → изменения узлов. Ответ нейросети проверяется: только существующие узлы."""
+    nodes = {str(n.get("id")): str(n.get("label", "")) for n in graph.get("nodes", [])}
+    prompt = SCENARIO_PROMPT.format(title=str(graph.get("title", ""))[:80], text=str(text)[:300],
+                                    nodes="\n".join(f"{k} — {v}" for k, v in list(nodes.items())[:40]))
+    raw = _parse_json(llm.ask([{"role": "user", "content": prompt}], max_tokens=300))
+    changes = {}
+    for c in raw.get("changes", [])[:6]:
+        nid = str(c.get("id", ""))
+        if nid in nodes:
+            strength = min(1.0, max(0.3, float(c.get("strength", 0.6) or 0.6)))
+            changes[nid] = round((1 if int(c.get("direction", 1)) >= 0 else -1) * strength, 2)
+    return {"changes": changes, "note": str(raw.get("note", ""))[:200]}
+
+
 JSON_TAIL = """
 
 Ответь ТОЛЬКО JSON-объектом без пояснений и без ```, по схеме:

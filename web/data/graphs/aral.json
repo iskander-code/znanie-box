@@ -1,32 +1,149 @@
 {
-  "id": "aral", "title": "Трагедия Аральского моря", "subject": "История Казахстана", "grade": 9, "text": "h086",
-  "source": "Тема «Трагедия Аральского моря»", "verified_by_teacher": true,
-  "delayLabels": ["сразу", "через годы", "через десятилетия"],
+  "id": "aral",
+  "title": "Трагедия Аральского моря",
+  "subject": "История Казахстана",
+  "grade": 9,
+  "text": "h086",
+  "source": "Тема «Трагедия Аральского моря»",
+  "verified_by_teacher": true,
+  "delayLabels": [
+    "сразу",
+    "через годы",
+    "через десятилетия"
+  ],
   "nodes": [
-    {"id": "irrigation", "label": "Забор воды на орошение", "adjustable": true},
-    {"id": "inflow", "label": "Приток рек в море"},
-    {"id": "level", "label": "Уровень моря"},
-    {"id": "salinity", "label": "Солёность воды"},
-    {"id": "fish", "label": "Рыба в море"},
-    {"id": "fishing", "label": "Рыболовство в Аральске"},
-    {"id": "dust", "label": "Соль и пыль с обсохшего дна"},
-    {"id": "health", "label": "Здоровье жителей Приаралья"},
-    {"id": "dam", "label": "Плотина Кокарал", "adjustable": true}
+    {
+      "id": "irrigation",
+      "label": "Забор воды на орошение",
+      "adjustable": true
+    },
+    {
+      "id": "inflow",
+      "label": "Приток рек в море"
+    },
+    {
+      "id": "level",
+      "label": "Уровень моря"
+    },
+    {
+      "id": "salinity",
+      "label": "Солёность воды"
+    },
+    {
+      "id": "fish",
+      "label": "Рыба в море"
+    },
+    {
+      "id": "fishing",
+      "label": "Рыболовство в Аральске"
+    },
+    {
+      "id": "dust",
+      "label": "Соль и пыль с обсохшего дна"
+    },
+    {
+      "id": "health",
+      "label": "Здоровье жителей Приаралья"
+    },
+    {
+      "id": "dam",
+      "label": "Плотина Кокарал",
+      "adjustable": true
+    }
   ],
   "edges": [
-    {"from": "irrigation", "to": "inflow", "sign": -1, "strength": 3, "delay": 0, "evidence": "Из-за забора воды на орошение приток рек в Аральское море резко сократился"},
-    {"from": "inflow", "to": "level", "sign": 1, "strength": 3, "delay": 1, "evidence": "Когда приток уменьшился, уровень моря стал падать"},
-    {"from": "level", "to": "salinity", "sign": -1, "strength": 3, "delay": 1, "evidence": "С падением уровня солёность воды выросла"},
-    {"from": "salinity", "to": "fish", "sign": -1, "strength": 3, "delay": 1, "evidence": "большинство видов рыб исчезло"},
-    {"from": "fish", "to": "fishing", "sign": 1, "strength": 3, "delay": 1, "evidence": "Исчезновение рыбы погубило рыболовство в Аральске"},
-    {"from": "level", "to": "dust", "sign": -1, "strength": 2, "delay": 2, "evidence": "С обсохшего дна ветер поднимает соль и пыль"},
-    {"from": "dust", "to": "health", "sign": -1, "strength": 2, "delay": 2, "evidence": "что вредит здоровью людей"},
-    {"from": "dam", "to": "level", "sign": 1, "strength": 2, "delay": 1, "evidence": "задержала воду Сырдарьи и подняла уровень Малого Арала"}
+    {
+      "from": "irrigation",
+      "to": "inflow",
+      "sign": -1,
+      "strength": 3,
+      "delay": 0,
+      "evidence": "Из-за забора воды на орошение приток рек в Аральское море резко сократился",
+      "verb": "забирает воду и сокращает"
+    },
+    {
+      "from": "inflow",
+      "to": "level",
+      "sign": 1,
+      "strength": 3,
+      "delay": 1,
+      "evidence": "Когда приток уменьшился, уровень моря стал падать",
+      "verb": "поднимает"
+    },
+    {
+      "from": "level",
+      "to": "salinity",
+      "sign": -1,
+      "strength": 3,
+      "delay": 1,
+      "evidence": "С падением уровня солёность воды выросла",
+      "verb": "при обмелении повышает"
+    },
+    {
+      "from": "salinity",
+      "to": "fish",
+      "sign": -1,
+      "strength": 3,
+      "delay": 1,
+      "evidence": "большинство видов рыб исчезло",
+      "verb": "губит"
+    },
+    {
+      "from": "fish",
+      "to": "fishing",
+      "sign": 1,
+      "strength": 3,
+      "delay": 1,
+      "evidence": "Исчезновение рыбы погубило рыболовство в Аральске",
+      "verb": "кормит"
+    },
+    {
+      "from": "level",
+      "to": "dust",
+      "sign": -1,
+      "strength": 2,
+      "delay": 2,
+      "evidence": "С обсохшего дна ветер поднимает соль и пыль",
+      "verb": "обнажает дно и поднимает"
+    },
+    {
+      "from": "dust",
+      "to": "health",
+      "sign": -1,
+      "strength": 2,
+      "delay": 2,
+      "evidence": "что вредит здоровью людей",
+      "verb": "подрывает"
+    },
+    {
+      "from": "dam",
+      "to": "level",
+      "sign": 1,
+      "strength": 2,
+      "delay": 1,
+      "evidence": "задержала воду Сырдарьи и подняла уровень Малого Арала",
+      "verb": "поднимает (Малый Арал)"
+    }
   ],
   "scenarios": [
-    {"label": "Забор воды на орошение резко вырос", "changes": {"irrigation": 0.8}},
-    {"label": "Построили плотину Кокарал", "changes": {"dam": 0.7}},
-    {"label": "Забор воды сократили вдвое", "changes": {"irrigation": -0.5}}
+    {
+      "label": "Забор воды на орошение резко вырос",
+      "changes": {
+        "irrigation": 0.8
+      }
+    },
+    {
+      "label": "Построили плотину Кокарал",
+      "changes": {
+        "dam": 0.7
+      }
+    },
+    {
+      "label": "Забор воды сократили вдвое",
+      "changes": {
+        "irrigation": -0.5
+      }
+    }
   ],
   "questions": [
     "Кто получил выгоду от орошения полей, а кто расплатился за неё? Как ты думаешь, можно ли было найти баланс?",

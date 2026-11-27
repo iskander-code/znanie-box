@@ -147,9 +147,10 @@ test('опыты PhET: у каждого есть файл и задание, т
   const labs = load('../web/data/phet.json');
   const ids = new Set(texts.map((d) => d.id));
   const files = readdirSync(new URL('../web/phet/', import.meta.url)).filter((f) => f.endsWith('.html'));
-  assert.deepEqual(files.sort(), labs.map((l) => `${l.id}.html`).sort(), 'список web/phet/ и data/phet.json расходятся');
+  assert.deepEqual(files.sort(), labs.filter((l) => !l.src).map((l) => `${l.id}.html`).sort(), 'список web/phet/ и data/phet.json расходятся');
+  for (const l of labs.filter((x) => x.src)) assert.ok(readFileSync(new URL(`../web/${l.src}`, import.meta.url), 'utf8').includes('<canvas'), `${l.src}: свой симулятор`);
   for (const l of labs) {
-    assert.ok(l.title && l.task && ['physics', 'algebra', 'geometry'].includes(l.subject), l.id);
+    assert.ok(l.title && l.task && ['physics', 'algebra', 'geometry', 'geography', 'biology', 'chemistry'].includes(l.subject), l.id);
     for (const t of l.topics) assert.ok(ids.has(t), `${l.id}: нет темы ${t}`);
   }
 });
@@ -235,4 +236,47 @@ test('Markdown в ответах нейросети: заголовки, жир�
   assert.ok(!html.includes('<script>'), 'HTML из ответа модели не выполняется');
   assert.match(renderMarkdown('## Итог'), /<h3>Итог<\/h3>/);
   assert.equal(markdownToText('### Итог\n**Важно**: *да*'), 'Итог\nВажно: да');
+});
+
+test('тема библиотеки: главное, термины, формулы и вопросы «Проверь себя» из текста', async () => {
+  const { docStructure } = await import('../web/js/doc-structure.js');
+  const byDoc = (id) => texts.find((d) => d.id === id);
+  const ohm = docStructure(byDoc('p051'));
+  assert.deepEqual(ohm.formulas.slice(0, 2), ['I = U / R', 'P = UI']);
+  assert.ok(ohm.questions.length >= 3 && ohm.questions.every((q) => q.q && q.a));
+  assert.deepEqual(docStructure(byDoc('b015')).terms[0].term, 'Фотосинтез');
+  assert.equal(docStructure(byDoc('c016')).terms[0].term, 'Кислород O₂');
+  assert.deepEqual(docStructure(byDoc('a032')).formulas.slice(0, 2), ['D = b² − 4ac', 'x = (−b ± √D) / 2a']);
+  for (const d of texts) assert.ok(docStructure(d).questions.length >= 2, `${d.id}: есть вопросы для самопроверки`);
+});
+
+test('«Своё условие»: текст ученика превращается в изменения узлов схемы', async () => {
+  const { parseScenario } = await import('../web/js/ideas.js');
+  const aral = byId('aral');
+  assert.deepEqual(parseScenario(aral, 'А что, если построили плотину выше по течению?').changes, { dam: 0.6 });
+  assert.deepEqual(parseScenario(aral, 'Что, если запретили забор воды на орошение?').changes, { irrigation: -0.6 }, 'одно слово — один фактор');
+  assert.deepEqual(parseScenario(aral, 'Что, если резко уменьшить приток рек?').changes, { inflow: -0.9 });
+  assert.deepEqual(parseScenario(byId('tselina'), 'Что, если ввели запрет на распашку степи?').changes, { plow: -0.6 });
+  assert.deepEqual(parseScenario(aral, 'Что, если в школе сделают ремонт?').changes, {}, 'не про схему — ничего не меняем');
+});
+
+test('идея ученика: новый узел на схеме, последствия по цепочке и встроенный разбор Совы', async () => {
+  const { withIdeas, ideaEffects, localIdeaFeedback } = await import('../web/js/ideas.js');
+  const { relationVerb } = await import('../web/js/graph-view.js');
+  const aral = byId('aral');
+  const idea = { id: 'idea1', label: 'Капельное орошение', hypothesis: 'Если поливать по капле, воды на поля нужно меньше', links: [{ from: 'idea1', to: 'irrigation', sign: -1 }] };
+  const g = withIdeas(aral, [idea]);
+  assert.equal(g.nodes.length, aral.nodes.length + 1);
+  assert.ok(g.nodes.at(-1).idea && g.edges.at(-1).idea);
+  assert.equal(aral.nodes.length, 9, 'эталонная схема не меняется');
+  const { effects } = ideaEffects(aral, idea);
+  assert.deepEqual(effects.find((e) => e.id === 'level').trend, 'up', 'меньше забора воды → уровень моря растёт');
+  const fb = localIdeaFeedback(aral, idea);
+  assert.match(fb, /Интересная идея/);
+  assert.match(fb, /побочн/);
+  assert.match(fb, /\*\*Вопрос:\*\*.*\?$/);
+  assert.equal(relationVerb(aral.edges[0]), 'забирает воду и сокращает', 'смысловая связь вместо «−»');
+  assert.equal(relationVerb({ sign: 1, strength: 2 }), 'вызывает рост');
+  assert.equal(relationVerb({ sign: -1, strength: 2 }), 'приводит к уменьшению');
+  for (const gr of graphs) for (const e of gr.edges) assert.ok(e.verb, `${gr.id}: у связи ${e.from}→${e.to} есть понятное слово`);
 });

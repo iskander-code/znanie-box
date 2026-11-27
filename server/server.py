@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import argparse
 import gzip
+import html
 import json
 import os
 import re
@@ -27,7 +28,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import llm  # noqa: E402
 from cache import AnswerCache  # noqa: E402
 import tts  # noqa: E402
-from graphs import extract  # noqa: E402
+from graphs import extract, idea_feedback, parse_scenario  # noqa: E402
 from rag import Library, is_relevant  # noqa: E402
 from teacher import Teacher, hash_pin  # noqa: E402
 
@@ -39,6 +40,22 @@ TEACHER = Teacher(ROOT / "data" / "state.json")
 CACHE = AnswerCache(ROOT / "data" / "cache.sqlite")
 MAX_BODY = 200_000
 EXAM_GENERAL = "Сейчас идёт контрольная: Сова помогает только подсказками по темам школьной библиотеки. Попробуй спросить про тему из учебника."
+
+
+def teacher_sims() -> list[dict]:
+    """HTML-симуляторы, которые учитель положил в web/sims/ (например, скачанные с phet.colorado.edu)."""
+    catalog = json.loads((WEB / "data" / "phet.json").read_text(encoding="utf-8"))
+    known = {l.get("src") for l in catalog}
+    out = []
+    for f in sorted((WEB / "sims").glob("*.html")):
+        src = f"sims/{f.name}"
+        if src in known:
+            continue
+        m = re.search(r"<title>(.*?)</title>", f.read_text(encoding="utf-8", errors="ignore")[:20000], re.S | re.I)
+        title = re.sub(r"[\u202a-\u202e]", "", html.unescape(m.group(1))).strip() if m else ""  # PhET пишет заголовок кодами символов
+        out.append({"id": "sims-" + re.sub(r"[^a-z0-9-]", "-", f.stem.lower()), "title": title or f.stem, "subject": "other",
+                    "src": src, "topics": [], "task": "Лаборатория, добавленная учителем. Меняй условия и наблюдай, что получится."})
+    return out
 
 
 def lan_addresses() -> list[str]:
@@ -223,6 +240,8 @@ class Handler(SimpleHTTPRequestHandler):
             if not self._teacher():
                 return self._denied()
             return self._json({"topics": TEACHER.summary(), "sims": TEACHER.sims_summary()})
+        if path == "/api/sims":
+            return self._json(teacher_sims())
         if path == "/api/graphs":
             USER_GRAPHS.mkdir(parents=True, exist_ok=True)
             graphs = [json.loads(p.read_text(encoding="utf-8")) for p in sorted(USER_GRAPHS.glob("*.json"))]
@@ -294,6 +313,22 @@ class Handler(SimpleHTTPRequestHandler):
                 if is_relevant(fr):
                     TEACHER.record(fr[0]["docId"], fr[0]["title"], "report")
                 return self._json({"ok": True})
+            if path == "/api/idea":
+                # «Проверить мою идею с Совой»: разбор идеи ученика нейросетью (без нейросети — разбор в браузере).
+                if not llm.available():
+                    return self._json({"answer": None, "llm": False})
+                try:
+                    return self._json({"answer": clean_answer(idea_feedback(body)), "model": llm.label()})
+                except (llm.OnlineUnavailable, OSError, ValueError) as e:
+                    return self._json({"answer": None, "error": str(e)})
+            if path == "/api/scenario":
+                # «Своё условие» → изменения узлов схемы. Без нейросети условие разбирает браузер.
+                if not llm.available():
+                    return self._json({"changes": {}, "llm": False})
+                try:
+                    return self._json(parse_scenario(body.get("graph") or {}, str(body.get("text", ""))))
+                except (llm.OnlineUnavailable, OSError, ValueError, KeyError) as e:
+                    return self._json({"changes": {}, "error": str(e)})
             if path == "/api/report-sim":
                 # Обезличенно: какая схема, сколько факторов в прогнозе, какие не угадали.
                 wrong = [str(x)[:60] for x in body.get("wrong", [])][:20]

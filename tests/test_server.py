@@ -313,6 +313,39 @@ class ServerTest(unittest.TestCase):
         self.assertEqual((aral["runs"], aral["predictions"], aral["wrong"], aral["errorRate"]), (2, 5, 3, 0.6))
         self.assertEqual(aral["hardest"][0], "Солёность воды")
 
+    def test_idea_and_scenario_with_model(self):
+        from unittest import mock
+        llm = self.server.llm
+        graph = {"title": "Арал", "nodes": [{"id": "dam", "label": "Плотина"}, {"id": "level", "label": "Уровень моря"}], "edges": []}
+        with mock.patch.object(llm, "model", return_value=None), mock.patch.object(llm, "provider", return_value="local"):
+            self.assertFalse(self.post("/api/idea", {"graph": graph, "idea": {"label": "x"}})["llm"], "без нейросети — разбор в браузере")
+            self.assertEqual(self.post("/api/scenario", {"graph": graph, "text": "построили плотину"})["changes"], {})
+        replies = iter([
+            "**Отличная идея!** Подумай: откуда деревья возьмут воду в первые 3 года?",
+            '```json\n{"changes": [{"id": "dam", "direction": 1, "strength": 0.8}, {"id": "nope", "direction": -1}], "note": "Плотина поднимет уровень."}\n```',
+        ])
+        with mock.patch.object(llm, "model", return_value="fake"), mock.patch.object(llm, "ask", side_effect=lambda *a, **k: next(replies)) as ask:
+            r = self.post("/api/idea", {"graph": graph, "idea": {"label": "Лесополосы", "hypothesis": "задержат воду"}, "effects": ["▲ Уровень моря"]})
+            self.assertIn("откуда деревья", r["answer"])
+            self.assertIn("побочн", ask.call_args_list[0][0][0][0]["content"], "Сова ищет побочные эффекты")
+            s = self.post("/api/scenario", {"graph": graph, "text": "Что, если построили плотину?"})
+        self.assertEqual(s["changes"], {"dam": 0.8}, "несуществующие узлы отброшены")
+        self.assertEqual(s["note"], "Плотина поднимет уровень.")
+
+    def test_teacher_sims_folder(self):
+        import shutil
+        extra = self.server.WEB / "sims" / "zz-teacher-test.html"
+        shutil.copy(self.server.WEB / "phet" / "hookes-law.html", extra)
+        try:
+            _, raw = self.get("/api/sims")
+            sims = json.loads(raw)
+        finally:
+            extra.unlink()
+        mine = [x for x in sims if x["src"] == "sims/zz-teacher-test.html"]
+        self.assertEqual(len(mine), 1)
+        self.assertEqual(mine[0]["title"], "Закон Гука", "название из <title> файла PhET")
+        self.assertFalse(any(x["src"] == "sims/ohm-law.html" for x in sims), "свои симуляторы уже в каталоге")
+
     def test_context_from_library_is_capped(self):
         long = [{"title": f"Тема {i}", "text": "слово " * 400} for i in range(3)]
         system = self.server.tutor_messages({"message": "?", "mode": "explain"}, long)[0]["content"]

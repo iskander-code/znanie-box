@@ -1,11 +1,13 @@
 import { simulate, pathTo, findLoops, checkPredictions, trend, DEFAULT_DELAY_LABELS } from './engine.js';
-import { renderGraph, esc } from './graph-view.js';
+import { renderGraph, esc, relationVerb, relationPhrase } from './graph-view.js';
+import { parseScenario, withIdeas, ideaEffects, localIdeaFeedback } from './ideas.js';
 import { Library, localAnswer, makeQuiz, checkQuiz, RELEVANT } from './tutor-local.js';
-import { detectBrowserLLM, warmUpBrowserLLM, chatBrowserStream, readNDJSON, tutorMessages, generalMessages, cleanAnswer, DEBRIEF, TEACHER_AI } from './llm-browser.js';
+import { detectBrowserLLM, warmUpBrowserLLM, chatBrowserStream, readNDJSON, tutorMessages, generalMessages, cleanAnswer, DEBRIEF, TEACHER_AI, IDEA_PROMPT } from './llm-browser.js';
 import { themeSwitcher, applyTheme, setTheme, currentTheme, reduceMotion, speak } from './a11y.js';
 import { login, getToken, setToken, recordLocal, localSummary, resetLocalStats, localExam, setLocalExam, changeLocalPin, recordLocalSim, localSims } from './teacher.js';
 import { qrSVG } from './qr.js';
 import { renderMarkdown, markdownToText } from './markdown.js';
+import { docStructure } from './doc-structure.js';
 import { PROVIDERS as ONLINE, keyOf, setKey, onlineProvider, setOnlineProvider, onlineLabel, onlineStatus, streamOnline, testKey, describe as describeOnline, Refused } from './online-browser.js';
 
 const app = document.getElementById('app');
@@ -56,31 +58,72 @@ async function boot() {
   S.texts = parts.flatMap((docs, i) => docs.map((d) => ({ ...d, subject: subjects[i].name, subjectId: subjects[i].id })));
   S.lib = new Library(S.texts);
   S.graphs = await Promise.all(index.map((id) => getJSON(`data/graphs/${id}.json`)));
-  try {
-    const r = await fetch('api/health', { cache: 'no-store' });
-    if (r.ok && r.headers.get('content-type')?.includes('json')) S.server = await r.json();
-  } catch { /* статический сайт */ }
+  S.server = await detectBox();
   if (S.server) {
     try { S.graphs.push(...(await getJSON('api/graphs'))); } catch { /* нет своих схем */ }
+    try { S.labs.push(...(await getJSON('api/sims'))); } catch { /* учитель ничего не добавлял */ }
   }
   S.chat.grade = store.get('grade', 8);
   S.exam = S.server ? !!S.server.exam : localExam();
   if (S.server) setInterval(syncSettings, 15000); // режим контрольной включается на всех устройствах класса
   renderStatus();
-  if (!S.server) {
-    // Сайт открыт не с коробки: пробуем Ollama на этом компьютере, не задерживая загрузку.
-    detectBrowserLLM().then(async (m) => {
-      if (!m) return;
-      S.browserLLM = m;
-      renderStatus();
-      route();
-      // Загружаем модель заранее, чтобы первый вопрос не ждал загрузки; без видеокарты берём модель побыстрее.
-      const best = await warmUpBrowserLLM(m);
-      if (best !== S.browserLLM) { S.browserLLM = best; renderStatus(); }
-    });
-  }
+  // Нейросеть на этом компьютере подключается только по кнопке «Подключить ИИ на этом компьютере»:
+  // сайт открывается мгновенно и не обращается к Ollama. Если учитель уже нажимал кнопку — подключаем сами.
+  if (!S.server && store.get('local-ai', false)) connectLocalAI(false);
   window.addEventListener('hashchange', route);
   route();
+}
+
+/**
+ * Режим работы: есть ли рядом коробка (server.py). Ждём не дольше 800 мс.
+ * На GitHub Pages коробки быть не может — не спрашиваем, чтобы в консоли не было ошибок 404.
+ */
+async function detectBox() {
+  if (/\.github\.io$/i.test(location.hostname) || location.protocol === 'file:') return null;
+  const ctrl = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(), 800);
+  try {
+    const r = await fetch('api/health', { cache: 'no-store', signal: ctrl.signal });
+    return r.ok && r.headers.get('content-type')?.includes('json') ? await r.json() : null;
+  } catch {
+    return null; // коробки нет — работает встроенный движок
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+/** Кнопка «Подключить ИИ на этом компьютере»: ищем Ollama, загружаем модель в память. */
+async function connectLocalAI(manual = true) {
+  if (S.localAI === 'busy') return;
+  S.localAI = 'busy';
+  if (manual) route();
+  const m = await detectBrowserLLM();
+  if (!m) {
+    S.localAI = manual ? 'missing' : null;
+    if (manual) route();
+    return;
+  }
+  store.set('local-ai', true);
+  S.browserLLM = m;
+  S.localAI = 'warming';
+  renderStatus();
+  route();
+  // Загружаем модель заранее, чтобы первый вопрос не ждал загрузки; без видеокарты берём модель побыстрее.
+  S.browserLLM = await warmUpBrowserLLM(m);
+  S.localAI = 'ready';
+  renderStatus();
+  if (/^#\/(ai|sova)/.test(location.hash)) route();
+}
+
+function localAIButton() {
+  if (S.server) return '';
+  if (S.browserLLM) return `<div class="info">✓ ИИ на этом компьютере подключён: ${esc(S.browserLLM)}${S.localAI === 'warming' ? ' — загружается в память…' : ''}.</div>`;
+  const busy = S.localAI === 'busy';
+  return `<div class="step local-ai">
+    <p><strong>Нейросеть на этом компьютере</strong> подключается по кнопке — так сайт открывается мгновенно даже на слабом телефоне.</p>
+    <button class="btn primary" data-action="connect-ai" ${busy ? 'disabled' : ''}>${busy ? 'Ищу нейросеть…' : '🧠 Подключить ИИ на этом компьютере'}</button>
+    ${S.localAI === 'missing' ? '<p class="muted small" role="status">Не нашла Ollama на этом компьютере. <a href="#/ai">Как включить нейросеть</a> — или ответы будут подсказками по библиотеке.</p>' : ''}
+  </div>`;
 }
 
 async function syncSettings() {
@@ -118,14 +161,18 @@ function renderStatus() {
     ai = 'без ИИ';
     details = 'Нейросеть не подключена — Сова отвечает подсказками по библиотеке. <a href="#/ai">Как включить нейросеть</a>.';
   }
-  const net = !navigator.onLine ? 'Офлайн' : S.server ? 'Коробка' : S.offlineReady ? 'Офлайн' : 'Сайт';
+  // 🟢 Коробка подключена (локальный ИИ) или 🟡 Демо-режим (встроенный движок без сервера).
+  const mode = S.server ? 'Коробка подключена' : 'Демо-режим';
+  const engine = S.server ? (on ? `локальный ИИ ${ai}` : 'ИИ не запущен') : (on ? ai : 'встроенный движок');
   const netDetails = !navigator.onLine ? 'Интернета нет — всё работает с устройства.'
     : S.offlineReady ? 'Темы, схемы и программа сохранены на этом устройстве: работает и без интернета.' : 'Сайт ещё сохраняется на устройство для работы без интернета.';
-  el.className = `status ${on ? 'on' : 'demo'}`;
-  el.querySelector('.status-text').innerHTML = `<span class="st-net">${esc(net)} · </span>${esc(ai)}`;
-  el.title = `${details.replace(/<[^>]+>/g, '')} ${netDetails}`;
+  const modeDetails = S.server ? 'Сайт открыт с Коробки: Сова, схемы и кабинет учителя работают через школьный сервер.'
+    : 'Демо-режим: коробки рядом нет, работает встроенный движок в браузере — библиотека, схемы, подсказки Совы.';
+  el.className = `status ${S.server ? 'box' : 'demo'} ${on ? 'on' : ''}`;
+  el.querySelector('.status-text').innerHTML = `<span class="st-long">${esc(mode)} · ${esc(engine)}</span><span class="st-short">${S.server ? 'Коробка' : 'Демо'}</span>`;
+  el.title = `${mode}. ${details.replace(/<[^>]+>/g, '')} ${netDetails}`;
   const pop = document.getElementById('status-pop');
-  if (pop) pop.innerHTML = `<p>${details}</p><p class="muted small">${netDetails}</p>`;
+  if (pop) pop.innerHTML = `<p><strong>${S.server ? '🟢' : '🟡'} ${mode}</strong> (${esc(S.server ? 'локальный ИИ' : 'встроенный движок')})</p><p>${modeDetails}</p><p>${details}</p><p class="muted small">${netDetails}</p>${S.server ? '' : '<p><a href="#/ai">Подключить ИИ на этом компьютере</a></p>'}`;
 }
 
 function route() {
@@ -136,6 +183,7 @@ function route() {
     if (on) a.setAttribute('aria-current', 'page'); else a.removeAttribute('aria-current');
   });
   closeDrawer();
+  if (view !== 'explore') document.body.classList.remove('ex-fs');
   const views = { '': viewHome, sova: viewSova, explore: viewExplore, build: viewBuild, teacher: viewTeacher, library: viewLibrary, labs: viewLabs, ai: viewAI, connect: viewConnect };
   (views[view] || viewHome)(id ? decodeURIComponent(id) : undefined);
   window.scrollTo(0, 0);
@@ -177,6 +225,7 @@ function viewAI() {
   app.innerHTML = `
   <h1>Как включить нейросеть</h1>
   ${on ? `<div class="info">✓ Нейросеть уже работает: ${esc(S.server?.model || browserAI())}. <a href="#/sova">Спросить Сову</a></div>` : ''}
+  ${localAIButton()}
   <p class="muted">Нейросеть работает на вашем компьютере через бесплатную программу Ollama — без интернета и без отправки вопросов наружу. Установите Ollama с ollama.com и скачайте модель командой <code>ollama pull qwen2.5:3b</code>.</p>
   <div class="step"><h3><span class="n">1</span> Способ «коробка» — надёжный</h3>
     <p>Скачайте проект с GitHub (зелёная кнопка Code → Download ZIP), распакуйте и дважды нажмите <strong>Запустить.bat</strong>. Откроется браузер с прототипом, нейросеть подключится сама. Нужен Python 3.10+.</p>
@@ -187,6 +236,16 @@ function viewAI() {
 }
 
 // ---------- библиотека ----------
+function docStructureHTML(doc) {
+  const st = docStructure(doc);
+  return `<section class="doc-parts">
+    <div class="doc-part"><h2>📌 Главное</h2><p>${esc(st.main)}</p></div>
+    ${st.terms.length ? `<div class="doc-part"><h2>🔤 Термины</h2><dl>${st.terms.map((t) => `<dt>${esc(t.term)}</dt><dd>${esc(t.def)}</dd>`).join('')}</dl></div>` : ''}
+    ${st.formulas.length ? `<div class="doc-part"><h2>∑ Формулы</h2><ul class="formulas">${st.formulas.map((f) => `<li><code>${esc(f)}</code></li>`).join('')}</ul></div>` : ''}
+    <div class="doc-part"><h2>❓ Проверь себя</h2><ol class="self-check">${st.questions.map((q) => `<li>${esc(q.q)}<details><summary>Показать ответ</summary><p>${esc(q.a)}</p></details></li>`).join('')}</ol></div>
+  </section>`;
+}
+
 function viewLibrary(id) {
   const doc = id && S.texts.find((t) => t.id === id);
   if (doc) {
@@ -194,8 +253,9 @@ function viewLibrary(id) {
     const i = list.indexOf(doc);
     app.innerHTML = `<a class="back" href="#/library/${doc.subjectId}">← ${esc(doc.subject)}</a>
       <article class="doc" id="doc"><span class="tag">${esc(doc.subject)} · ${doc.grade} класс · ${esc(doc.section)}</span><h1>${esc(doc.title)}</h1><p>${esc(doc.text)}</p></article>
+      ${docStructureHTML(doc)}
       <div class="row"><button class="btn" data-action="speak-doc" aria-pressed="false">🔊 Озвучить текст</button>${doc.graph ? `<a class="btn primary" href="#/explore/${doc.graph}">🔀 Схема «Что будет, если…»</a>` : ''}
-      ${labsFor(doc.id).map((l) => `<a class="btn primary" href="#/labs/${esc(l.id)}">🧪 Опыт «${esc(l.title)}»</a>`).join('')}
+      ${labsFor(doc.id).map((l) => `<a class="btn primary" href="#/labs/${esc(l.id)}">🧪 Открыть лабораторию по теме: «${esc(l.title)}»</a>`).join('')}
       <button class="btn" data-action="ask-about" data-title="${esc(doc.title)}">🦉 Спросить Сову об этом</button></div>
       <div class="row pager">${i > 0 ? `<a class="btn ghost" href="#/library/${list[i - 1].id}">← ${esc(list[i - 1].title)}</a>` : ''}${i < list.length - 1 ? `<a class="btn ghost" href="#/library/${list[i + 1].id}">${esc(list[i + 1].title)} →</a>` : ''}</div>`;
     return;
@@ -221,7 +281,10 @@ function viewLibrary(id) {
       const docs = S.texts.filter((t) => t.subjectId === s.id);
       const g = docs.map((d) => d.grade);
       return `<a class="card" href="#/library/${s.id}"><span class="icon">${s.icon}</span><strong>${esc(s.name)}</strong><span class="muted">${docs.length} тем · ${Math.min(...g)}–${Math.max(...g)} классы</span></a>`;
-    }).join('')}</div>`;
+    }).join('')}</div>
+    <div class="lib-tabs" role="tablist" aria-label="Разделы библиотеки">
+      <a class="card lab-entry" href="#/labs"><span class="icon">🧪</span><strong>Интерактивные лаборатории (PhET)</strong><span class="muted">${S.labs.length} лабораторий: закон Ома, парниковый эффект, плотность, маятник, графики… Работают без интернета</span></a>
+    </div>`;
 }
 
 function renderLibList(subjectId) {
@@ -251,6 +314,7 @@ function viewSova() {
       <label class="muted">Класс <select data-action-change="grade">${[5, 6, 7, 8, 9, 10, 11].map((g) => `<option ${g === c.grade ? 'selected' : ''}>${g}</option>`).join('')}</select></label>
     </div>
     ${S.exam ? '<div class="info exam" role="status">📝 Идёт контрольная работа: Сова даёт только подсказки, готовых ответов нет.</div>' : ''}
+    ${!S.server && !browserAI() ? localAIButton() : ''}
     <p id="tts-note" class="muted small" hidden></p>
     <div class="messages" id="messages" aria-live="polite">
       ${c.messages.length ? '' : `<div class="msg assistant"><p>Привет! Я Сова. Спроси меня о том, что непонятно в параграфе. Например:</p>
@@ -274,7 +338,12 @@ function viewSova() {
 }
 
 function renderMsg(m, i) {
-  const sources = (m.sources || []).map((s) => `<a class="chip src" href="#/library/${esc(s.docId)}">📖 ${esc(s.title)}</a>`).join('');
+  const sources = (m.sources || []).map((s) => {
+    const d = S.texts.find((t) => t.id === s.docId);
+    const where = d ? `${d.subject} · ${d.grade} кл. · ${d.section}` : '';
+    const quote = (s.text || d?.text || '').slice(0, 220);
+    return `<a class="chip src" href="#/library/${esc(s.docId)}" title="«${esc(quote)}»">📖 ${where ? `<span class="src-where">${esc(where)} —</span> ` : ''}«${esc(s.title)}»</a>`;
+  }).join('');
   const graph = m.graph ? `<a class="chip graph" href="#/explore/${esc(m.graph)}">🔀 Открыть схему «${esc(graphById(m.graph)?.title || m.graph)}»</a>` : '';
   const by = m.role === 'assistant' && m.by ? `<span class="by">${esc(m.by)}</span>` : '';
   const say = m.role === 'assistant' ? `<button class="say" data-action="speak-msg" data-i="${i}" aria-pressed="false" aria-label="Озвучить ответ" title="Озвучить">🔊</button>` : '';
@@ -454,6 +523,115 @@ function sendChat(text) {
   askSova(text, c.mode === 'explain' ? 2 : 0);
 }
 
+// ---------- идеи ученика (общие для «Что будет, если…» и «Собери сам») ----------
+const ideasOf = (gid) => store.get(`ideas-${gid}`, []);
+const saveIdeas = (gid, ideas) => store.set(`ideas-${gid}`, ideas);
+/** Схема «Что будет, если…» вместе с идеями ученика. */
+const exGraph = () => withIdeas(graphById(S.ex.graphId), ideasOf(S.ex.graphId));
+const compactGraph = (g) => ({ title: g.title, nodes: g.nodes.map((n) => ({ id: n.id, label: n.label })), edges: g.edges.map((e) => ({ from: e.from, to: e.to, sign: e.sign, verb: relationVerb(e), evidence: (e.evidence || '').slice(0, 160) })) });
+
+function ideaSectionHTML(gid, open = false) {
+  const g = graphById(gid);
+  const ideas = ideasOf(gid);
+  const opts = (sel) => g.nodes.map((n) => `<option value="${esc(n.id)}" ${sel === n.id ? 'selected' : ''}>${esc(n.label)}</option>`).join('');
+  const draft = S.ideaDraft?.gid === gid ? S.ideaDraft : {};
+  return `<details class="step idea-box" ${open || ideas.length || draft.label ? 'open' : ''}>
+    <summary><strong>💡 Моя идея</strong> <span class="muted small">— придумай свой фактор или решение и соедини стрелкой со схемой</span></summary>
+    ${ideas.map((i) => `<div class="idea-card">
+      <strong>💡 ${esc(i.label)}</strong>
+      <ul class="small">${i.links.map((l) => `<li>${esc(l.from === i.id ? `«${i.label}» ${l.sign > 0 ? 'вызывает рост' : 'приводит к уменьшению'} «${nodeLabel(g, l.to)}»` : `«${nodeLabel(g, l.from)}» ${l.sign > 0 ? 'вызывает рост' : 'приводит к уменьшению'} «${i.label}»`)}</li>`).join('')}</ul>
+      ${i.hypothesis ? `<p class="muted small">Моя гипотеза: ${esc(i.hypothesis)}</p>` : ''}
+      <div class="row"><button class="btn primary small" data-action="idea-check" data-g="${esc(gid)}" data-id="${esc(i.id)}" ${i.busy ? 'disabled' : ''}>${i.busy ? 'Сова думает…' : '🦉 Проверить мою идею с Совой'}</button>
+        <button class="btn ghost small" data-action="idea-del" data-g="${esc(gid)}" data-id="${esc(i.id)}">Удалить</button></div>
+      ${i.feedback ? `<div class="msg assistant"><div class="md">${renderMarkdown(i.feedback)}</div><span class="by">${esc(i.by || 'Сова')}</span></div>` : ''}
+    </div>`).join('')}
+    <form data-form="idea" data-g="${esc(gid)}" class="idea-form">
+      <label>Моя идея (новый фактор или решение)<input name="label" required maxlength="60" placeholder="Например: «Капельное орошение»" value="${esc(draft.label || '')}"></label>
+      <div class="idea-link"><span>Моя идея</span>
+        <select name="sign1" aria-label="Как влияет"><option value="1">вызывает рост</option><option value="-1">приводит к уменьшению</option></select>
+        <select name="to1" aria-label="На что влияет">${opts(draft.to)}</select></div>
+      <div class="idea-link"><span>И ещё (необязательно)</span>
+        <select name="sign2" aria-label="Как влияет"><option value="1">вызывает рост</option><option value="-1">приводит к уменьшению</option></select>
+        <select name="to2" aria-label="На что влияет"><option value="">— не выбрано —</option>${opts()}</select></div>
+      <div class="idea-link"><span>На мою идею влияет (необязательно)</span>
+        <select name="from" aria-label="Что влияет на идею"><option value="">— не выбрано —</option>${opts()}</select>
+        <select name="signFrom" aria-label="Как влияет"><option value="1">вызывает её рост</option><option value="-1">мешает ей</option></select></div>
+      <label>Моя гипотеза — почему так будет?<textarea name="hypothesis" rows="2" maxlength="400" placeholder="Если …, то …, потому что …">${esc(draft.hypothesis || '')}</textarea></label>
+      <button class="btn">➕ Добавить идею на схему</button>
+    </form>
+  </details>`;
+}
+
+function addIdea(form) {
+  const gid = form.dataset.g;
+  const ideas = ideasOf(gid);
+  const id = `idea${Date.now().toString(36)}`;
+  const links = [{ from: id, to: form.to1.value, sign: Number(form.sign1.value) }];
+  if (form.to2.value && form.to2.value !== form.to1.value) links.push({ from: id, to: form.to2.value, sign: Number(form.sign2.value) });
+  if (form.from.value) links.push({ from: form.from.value, to: id, sign: Number(form.signFrom.value) });
+  ideas.push({ id, label: form.label.value.trim().slice(0, 60), hypothesis: form.hypothesis.value.trim().slice(0, 400), links });
+  saveIdeas(gid, ideas);
+  S.ideaDraft = null;
+  refreshIdeaViews(gid);
+}
+
+function refreshIdeaViews(gid) {
+  if (S.ex?.graphId === gid && location.hash.startsWith('#/explore')) { S.ex.result = null; S.ex.phase = 'setup'; viewExplore(gid); }
+  else if (location.hash.startsWith('#/build')) viewBuild(gid);
+}
+
+/** «Проверить мою идею с Совой»: нейросеть (коробка, онлайн или Ollama) или встроенный разбор. */
+async function checkIdea(gid, ideaId) {
+  const ideas = ideasOf(gid);
+  const idea = ideas.find((i) => i.id === ideaId);
+  if (!idea) return;
+  const g = graphById(gid);
+  idea.busy = true;
+  saveIdeas(gid, ideas);
+  refreshIdeaViews(gid);
+  const { effects } = ideaEffects(g, idea);
+  const payload = { graph: compactGraph(g), idea: { label: idea.label, hypothesis: idea.hypothesis, links: idea.links.map((l) => ({ from: l.from === idea.id ? idea.label : nodeLabel(g, l.from), to: l.to === idea.id ? idea.label : nodeLabel(g, l.to), sign: l.sign })) },
+    effects: effects.slice(0, 6).map((e) => `${e.trend === 'up' ? '▲' : '▼'} ${e.label}`) };
+  let feedback = null;
+  let by = 'Сова · встроенный разбор';
+  try {
+    if (S.server?.llm) {
+      const r = await postJSON('api/idea', payload);
+      if (r.answer) { feedback = r.answer; by = `Сова · нейросеть ${r.model || ''}`.trim(); }
+    } else if (browserAI()) {
+      feedback = await browserAsk([{ role: 'system', content: IDEA_PROMPT }, { role: 'user', content: JSON.stringify(payload) }], () => {}, 500);
+      by = `Сова · нейросеть ${browserAI()}`;
+    }
+  } catch { /* нейросеть недоступна — встроенный разбор */ }
+  const fresh = ideasOf(gid);
+  const target = fresh.find((i) => i.id === ideaId);
+  if (target) {
+    target.feedback = feedback || localIdeaFeedback(g, idea);
+    target.by = feedback ? by : 'Сова · встроенный разбор';
+    delete target.busy;
+    saveIdeas(gid, fresh);
+  }
+  refreshIdeaViews(gid);
+}
+
+/** Инспектор: что за фактор, как связан с соседями, точные цитаты. */
+function inspectorHTML(g, id) {
+  const n = g.nodes.find((x) => x.id === id);
+  if (!n) return '';
+  const delays = g.delayLabels || DEFAULT_DELAY_LABELS;
+  const incoming = g.edges.filter((e) => e.to === id);
+  const outgoing = g.edges.filter((e) => e.from === id);
+  const rel = (e) => `<li><strong>${esc(relationPhrase(g, e))}</strong> <span class="muted small">· ${esc(delays[e.delay] || '')}</span>${e.evidence ? `<blockquote>${e.idea ? '' : '«'}${esc(e.evidence)}${e.idea ? '' : '»'}</blockquote>` : ''}</li>`;
+  const v = S.ex?.result?.total?.[id];
+  return `<div class="inspector" aria-live="polite">
+    <div class="ins-head"><span class="tag">${n.idea ? '💡 Моя идея' : n.adjustable ? 'Можно менять' : 'Фактор схемы'}</span><button class="link" data-action="close-inspect" aria-label="Закрыть инспектор">✕</button></div>
+    <h3 class="ins-title">${esc(n.label)}</h3>
+    ${v !== undefined && trend(v) !== 'same' ? `<p class="ins-trend ${trend(v)}">${ARROW[trend(v)]} ${TREND_PAST[trend(v)]} на ${Math.round(Math.abs(v) * 100)}%</p>` : ''}
+    ${incoming.length ? `<h4>Что на него влияет</h4><ul class="rel-list">${incoming.map(rel).join('')}</ul>` : '<p class="muted small">На этот фактор ничего не влияет в схеме — его можно менять самому.</p>'}
+    ${outgoing.length ? `<h4>На что влияет он</h4><ul class="rel-list">${outgoing.map(rel).join('')}</ul>` : '<p class="muted small">Это конечное последствие: дальше цепочка не идёт.</p>'}
+  </div>`;
+}
+
 // ---------- «Что будет, если…» ----------
 function viewExplore(id) {
   const g = id && graphById(id);
@@ -462,29 +640,38 @@ function viewExplore(id) {
     return;
   }
   if (!S.ex || S.ex.graphId !== id) {
-    S.ex = { graphId: id, changes: {}, selected: null, tool: 'change', predictions: {}, result: null, anim: null, phase: 'setup', info: null, highlight: null, showText: false, debrief: '', busy: false };
+    S.ex = { graphId: id, changes: {}, selected: null, tool: 'change', predictions: {}, result: null, anim: null, phase: 'setup', info: null, highlight: null, showText: false, debrief: '', busy: false, fs: false, inspect: null, parsed: null };
   }
   const x = S.ex;
-  const loops = findLoops(g);
+  const loops = findLoops(exGraph());
+  document.body.classList.toggle('ex-fs', !!x.fs);
   app.innerHTML = `
   <a class="back" href="#/explore">← Все схемы</a>
   <div class="ex-head"><div><span class="tag">${esc(g.subject || 'Своя схема')}${g.grade ? ` · ${g.grade} класс` : ''}</span><h1>${esc(g.title)}</h1>
     <p class="muted">${g.verified_by_teacher ? '✓ Схема проверена учителем' : 'Черновик схемы'} · <button class="link" data-action="toggle-text">${x.showText ? 'Скрыть текст' : 'Показать текст параграфа'}</button></p></div>
     <a class="btn" href="#/build/${esc(g.id)}">🧩 Собрать самому</a></div>
   ${x.showText ? `<div class="paragraph">${highlightEvidence(textOf(g), g)}</div>` : ''}
-  <div class="explore">
+  <div class="explore ${x.fs ? 'fs' : ''}" id="explore">
     <div class="graph-wrap" id="graph"></div>
-    <aside class="panel" id="panel"></aside>
+    <aside class="panel" id="panel" aria-label="Инспектор и шаги"></aside>
   </div>
-  <div class="legend"><span class="lg pos">+ усиливает</span><span class="lg neg">− ослабляет</span><span>▲ растёт · ▼ падает · ▲? твой прогноз</span>${loops.length ? `<span>Петель обратной связи: ${loops.length}</span>` : ''}</div>`;
+  <div class="legend"><span class="lg pos">▲ вызывает рост</span><span class="lg neg">▼ приводит к уменьшению</span><span class="lg idea">┄ моя идея</span><span>▲? твой прогноз</span>${loops.length ? `<span>Петель обратной связи: ${loops.length}</span>` : ''}<span class="muted">Схему можно двигать пальцем или мышью и приближать колёсиком или двумя пальцами.</span></div>`;
   drawExploreGraph();
   drawPanel();
 }
 
+function toggleFullscreen(on = !S.ex.fs) {
+  S.ex.fs = on;
+  viewExplore(S.ex.graphId);
+}
+
 function drawExploreGraph() {
-  const g = graphById(S.ex.graphId);
+  const g = exGraph();
   const x = S.ex;
   renderGraph(document.getElementById('graph'), g, {
+    zoom: true,
+    fullscreen: x.fs,
+    onFullscreen: () => toggleFullscreen(),
     total: x.anim || (x.phase === 'setup' ? x.changes : x.result?.total) || {},
     selected: x.selected,
     predictions: x.predictions,
@@ -492,11 +679,13 @@ function drawExploreGraph() {
     dimEdges: !!x.highlight,
     onNodeClick: (nid) => {
       if (x.phase === 'running') return;
+      x.inspect = nid;
       if (x.phase === 'done') { showWhy(nid); return; }
       x.selected = nid;
       x.info = null;
       drawExploreGraph();
       drawPanel();
+      document.getElementById('panel')?.scrollTo?.({ top: 0, behavior: reduceMotion() ? 'auto' : 'smooth' });
     },
     onEdgeClick: (e) => {
       x.info = { edge: e };
@@ -510,21 +699,33 @@ function drawExploreGraph() {
 const sliderWord = (v) => (v <= -70 ? 'сильно уменьшить' : v < 0 ? 'уменьшить' : v === 0 ? 'не менять' : v < 70 ? 'увеличить' : 'сильно увеличить');
 
 function drawPanel() {
-  const g = graphById(S.ex.graphId);
+  const g = exGraph();
   const x = S.ex;
   const panel = document.getElementById('panel');
+  if (!panel) return;
   const delays = g.delayLabels || DEFAULT_DELAY_LABELS;
   let h = '';
   if (x.info?.edge) {
     const e = x.info.edge;
-    h += `<div class="info"><strong>${esc(nodeLabel(g, e.from))} → ${esc(nodeLabel(g, e.to))}</strong>
-      <p>${e.sign > 0 ? 'Усиливает: чем больше первое, тем больше второе.' : 'Ослабляет: чем больше первое, тем меньше второе.'} Сила ${'●'.repeat(e.strength)}${'○'.repeat(3 - e.strength)}, проявляется ${esc(delays[e.delay] || '')}.</p>
-      <blockquote>«${esc(e.evidence)}»</blockquote><button class="link" data-action="close-info">Закрыть</button></div>`;
+    h += `<div class="inspector"><div class="ins-head"><span class="tag">Связь</span><button class="link" data-action="close-info" aria-label="Закрыть">✕</button></div>
+      <h3 class="ins-title">${esc(relationPhrase(g, e))}</h3>
+      <p>${e.sign > 0 ? '▲ Чем больше первое, тем больше второе.' : '▼ Чем больше первое, тем меньше второе.'} Сила ${'●'.repeat(e.strength)}${'○'.repeat(3 - e.strength)}, проявляется ${esc(delays[e.delay] || '')}.</p>
+      <blockquote>${e.idea ? '' : '«'}${esc(e.evidence)}${e.idea ? '' : '»'}</blockquote></div>`;
+  } else if (x.inspect && x.phase !== 'done') {
+    h += inspectorHTML(g, x.inspect);
   }
   if (x.phase === 'setup') {
     const changed = Object.entries(x.changes);
     h += `<div class="step"><h3><span class="n">1</span> Что меняем?</h3>
       ${(g.scenarios || []).length ? `<div class="row">${g.scenarios.map((s, i) => `<button class="chip" data-action="scenario" data-i="${i}">${esc(s.label)}</button>`).join('')}</div><p class="muted small">или нажми на любой узел схемы</p>` : '<p class="muted small">Нажми на узел схемы, который хочешь изменить</p>'}
+      <form data-form="scenario" class="own-scenario">
+        <label for="own-q">✍ Своё условие</label>
+        <div class="row"><input id="own-q" name="q" maxlength="200" placeholder="Что, если… построили плотину выше по течению?" value="${esc(x.parsed?.text || '')}"><button class="btn" ${x.parsed?.busy ? 'disabled' : ''}>${x.parsed?.busy ? 'Думаю…' : 'Понять'}</button></div>
+      </form>
+      ${x.parsed && !x.parsed.busy ? (x.parsed.matched.length
+        ? `<div class="info"><strong>Сова поняла так:</strong> ${x.parsed.matched.map((m) => `${m.dir > 0 ? '▲' : '▼'} «${esc(m.label)}»`).join(', ')}${x.parsed.note ? `<p class="small">${esc(x.parsed.note)}</p>` : ''}
+            <div class="row"><button class="btn primary small" data-action="scenario-apply">Применить</button><button class="btn ghost small" data-action="scenario-idea">Это другое — добавить как мою идею</button></div></div>`
+        : `<div class="info">В схеме нет такого фактора. <button class="btn small" data-action="scenario-idea">💡 Добавить «${esc(x.parsed.text.slice(0, 40))}» как мою идею</button></div>`) : ''}
       ${x.selected && x.tool === 'change' ? (() => {
         const v = Math.round((x.changes[x.selected] || 0) * 100);
         return `<div class="slider"><label><strong>${esc(nodeLabel(g, x.selected))}</strong>: <span id="sw">${sliderWord(v)}</span></label>
@@ -548,10 +749,14 @@ function drawPanel() {
     const checks = checkPredictions(r, x.predictions);
     const affected = Object.keys(r.total).filter((id) => !(id in x.changes) && trend(r.total[id]) !== 'same');
     h += checks.length ? `<div class="step"><h3>Твой прогноз: ${checks.filter((c) => c.correct).length} из ${checks.length}</h3><ul class="checks">${checks.map((c) => `<li class="${c.correct ? 'ok' : 'bad'}">${c.correct ? '✓' : '✗'} ${esc(nodeLabel(g, c.node))}: ты думал «${TREND_WORD[c.guess]}», на схеме — ${TREND_PAST[c.actual]}</li>`).join('')}</ul></div>` : '';
-    h += `<div class="step"><h3>Последствия по времени</h3><div class="timeline">${delays.map((label, i) => {
+    const stepName = (i) => (i === 0 ? 'Сразу' : i === delays.length - 1 && delays.length > 2 ? 'Долгосрочный эффект' : delays[i].replace(/^./, (c) => c.toUpperCase()));
+    h += `<div class="step"><h3>🁢 Цепочка домино</h3><ol class="domino">${delays.map((label, i) => {
       const items = affected.filter((id) => (r.when[id] ?? 0) === i).sort((a, b) => Math.abs(r.total[b]) - Math.abs(r.total[a]));
-      return `<div class="tcol"><span class="tlabel">${esc(label)}</span>${items.map((id) => `<button class="titem ${trend(r.total[id])}" data-action="why" data-id="${esc(id)}">${ARROW[trend(r.total[id])]} ${esc(nodeLabel(g, id))}</button>`).join('') || '<span class="muted small">—</span>'}</div>`;
-    }).join('')}</div><p class="muted small">Нажми на последствие или на узел схемы, чтобы увидеть цепочку «почему».</p></div>`;
+      return `<li class="dcol"><span class="tlabel">Шаг ${i + 1} · ${esc(stepName(i))}${i && stepName(i) !== delays[i].replace(/^./, (c) => c.toUpperCase()) ? ` <span class="muted">(${esc(label)})</span>` : ''}</span>${items.map((id) => {
+        const via = r.via[id];
+        return `<button class="titem ${trend(r.total[id])}" data-action="why" data-id="${esc(id)}">${ARROW[trend(r.total[id])]} ${esc(nodeLabel(g, id))}${via ? `<span class="tvia">из-за: «${esc(nodeLabel(g, via.from))}» ${ARROW[trend(r.total[via.from] || x.changes[via.from] || 0)]}</span>` : ''}</button>`;
+      }).join('') || '<span class="muted small">—</span>'}</li>`;
+    }).join('')}</ol><p class="muted small">Нажми на последствие или на узел схемы, чтобы увидеть цепочку «почему» и цитаты.</p></div>`;
     if (x.info?.why) h += `<div class="info">${x.info.why}</div>`;
     const loops = findLoops(g);
     if (loops.length) h += `<div class="step"><h3>Петли обратной связи</h3><ul class="list">${loops.map((l) => `<li><strong>${l.type === 'reinforcing' ? 'Усиливающая' : 'Стабилизирующая'}:</strong> ${l.nodes.map((n) => esc(nodeLabel(g, n))).join(' → ')} → ${esc(nodeLabel(g, l.nodes[0]))}</li>`).join('')}</ul></div>`;
@@ -561,6 +766,7 @@ function drawPanel() {
       ${g.questions?.length ? `<p class="question"><strong>Подумай:</strong> ${esc(g.questions[0])}</p>` : ''}</div>
       <button class="btn wide" data-action="reset">↺ Попробовать другое условие</button>`;
   }
+  h += ideaSectionHTML(S.ex.graphId, x.ideaOpen);
   panel.innerHTML = h;
 }
 
@@ -574,11 +780,11 @@ function highlightEvidence(text, g) {
 }
 
 function chainText(g, r, path) {
-  return path.map((e) => `«${nodeLabel(g, e.from)}» ${ARROW[trend(r.total[e.from])]} → «${nodeLabel(g, e.to)}» ${ARROW[trend(r.total[e.to])]}, потому что «${e.evidence}»`).join(';\n');
+  return path.map((e) => `«${nodeLabel(g, e.from)}» ${ARROW[trend(r.total[e.from])]} ${relationVerb(e)} «${nodeLabel(g, e.to)}» ${ARROW[trend(r.total[e.to])]} — «${e.evidence}»`).join(';\n');
 }
 
 function showWhy(id) {
-  const g = graphById(S.ex.graphId);
+  const g = exGraph();
   const x = S.ex;
   const r = x.result;
   const path = pathTo(r, id);
@@ -586,7 +792,7 @@ function showWhy(id) {
     x.info = { why: `<strong>${esc(nodeLabel(g, id))}</strong><p>${id in x.changes ? 'Это условие ты изменил сам.' : 'Этот фактор не изменился: до него изменение не дошло или оказалось слишком слабым.'}</p>` };
     x.highlight = null;
   } else {
-    x.info = { why: `<strong>Почему ${esc(nodeLabel(g, id))} ${TREND_PAST[trend(r.total[id])]}?</strong><ol class="chain">${path.map((e) => `<li>${esc(nodeLabel(g, e.from))} ${ARROW[trend(r.total[e.from])]} → ${esc(nodeLabel(g, e.to))} ${ARROW[trend(r.total[e.to])]}<blockquote>«${esc(e.evidence)}»</blockquote></li>`).join('')}</ol>` };
+    x.info = { why: `<strong>Почему «${esc(nodeLabel(g, id))}» ${TREND_PAST[trend(r.total[id])]}?</strong><ol class="chain">${path.map((e) => `<li>«${esc(nodeLabel(g, e.from))}» ${ARROW[trend(r.total[e.from])]} <strong>${esc(relationVerb(e))}</strong> «${esc(nodeLabel(g, e.to))}» ${ARROW[trend(r.total[e.to])]}<blockquote>${e.idea ? '' : '«'}${esc(e.evidence)}${e.idea ? '' : '»'}</blockquote></li>`).join('')}</ol>${inspectorHTML(g, id)}` };
     x.highlight = new Set(path);
   }
   drawExploreGraph();
@@ -613,8 +819,30 @@ function localDebrief(g, r, checks) {
   return lines.join('\n');
 }
 
+/** «Своё условие»: «Что, если построили плотину…» → изменения узлов схемы. */
+async function interpretScenario(text) {
+  const x = S.ex;
+  const g = exGraph();
+  text = text.trim();
+  if (!text) return;
+  x.parsed = { text, busy: true, matched: [] };
+  drawPanel();
+  let res = null;
+  if (S.server?.llm) {
+    try {
+      const r = await postJSON('api/scenario', { graph: compactGraph(g), text });
+      if (r.changes && Object.keys(r.changes).length) {
+        res = { changes: r.changes, note: r.note || '', matched: Object.entries(r.changes).map(([id, v]) => ({ id, label: nodeLabel(g, id), dir: v > 0 ? 1 : -1 })) };
+      }
+    } catch { /* нейросеть недоступна — встроенный разбор */ }
+  }
+  res ||= { ...parseScenario(g, text), note: '' };
+  x.parsed = { text, ...res };
+  drawPanel();
+}
+
 function runSimulation() {
-  const g = graphById(S.ex.graphId);
+  const g = exGraph();
   const x = S.ex;
   x.result = simulate(g, x.changes);
   const checks = checkPredictions(x.result, x.predictions);
@@ -654,7 +882,7 @@ function runSimulation() {
 }
 
 async function debriefWithSova() {
-  const g = graphById(S.ex.graphId);
+  const g = exGraph();
   const x = S.ex;
   x.busy = true;
   drawPanel();
@@ -761,8 +989,9 @@ function viewBuild(id) {
       <div class="row"><a class="btn primary" href="#/explore/${esc(g.id)}">Что будет, если… →</a><button class="btn" data-action="bd-restart">Собрать заново</button></div>
     </div>
     <h2 class="bd-h">Твоя схема</h2>
-    <div class="graph-wrap" id="graph"></div>`;
-    renderGraph(document.getElementById('graph'), partial);
+    <div class="graph-wrap" id="graph"></div>
+    ${ideaSectionHTML(g.id, true)}`;
+    renderGraph(document.getElementById('graph'), withIdeas(partial, ideasOf(g.id)), { zoom: true });
     return;
   }
 
@@ -811,8 +1040,9 @@ function viewBuild(id) {
 
   <h2 class="bd-h">Твоя схема ${b.done.length ? `<span class="muted small">· ${b.done.length} из ${total}</span>` : ''}</h2>
   ${b.done.length ? '<div class="graph-wrap" id="graph"></div>' : '<p class="muted">Пока пусто. Каждая найденная связь появится здесь стрелкой.</p>'}
-  ${b.done.length || b.step ? '<p><button class="btn ghost" data-action="bd-restart">Начать сначала</button></p>' : ''}`;
-  if (b.done.length) renderGraph(document.getElementById('graph'), partial);
+  ${b.done.length || b.step ? '<p><button class="btn ghost" data-action="bd-restart">Начать сначала</button></p>' : ''}
+  ${ideaSectionHTML(g.id)}`;
+  if (b.done.length) renderGraph(document.getElementById('graph'), withIdeas(partial, ideasOf(g.id)), { zoom: true });
 }
 
 function buildCheck() {
@@ -835,57 +1065,63 @@ function buildCheck() {
 
 // ---------- опыты PhET ----------
 // Симуляции PhET (Университет Колорадо, CC BY 4.0) лежат в web/phet/ и открываются без интернета.
-const LAB_SUBJECTS = { physics: '⚡ Физика', algebra: '𝑥 Алгебра', geometry: '△ Геометрия' };
+const LAB_SUBJECTS = { physics: '⚡ Физика', algebra: '𝑥 Алгебра', geometry: '△ Геометрия', geography: '🌍 География', biology: '🌱 Биология', chemistry: '⚗ Химия', other: '📁 Добавлено учителем' };
+/** Адрес лаборатории: свои симуляторы и файлы учителя лежат в sims/, опыты PhET — в phet/ (без статистики и внешних ссылок). */
+const labSrc = (l) => (l.src ? l.src : `phet/${l.id}.html${PHET_PARAMS}`);
+const labCredit = (l) => (l.own ? 'Симулятор сделан для «Знания в коробке», работает без интернета.' : l.subject === 'other' ? 'Файл добавлен учителем в папку web/sims/ на Коробке.' : PHET_CREDIT);
 const PHET_CREDIT = 'Симуляции <a href="https://phet.colorado.edu/ru/" target="_blank" rel="noopener">PhET Interactive Simulations</a>, Университет Колорадо в Боулдере, лицензия <a href="https://creativecommons.org/licenses/by/4.0/deed.ru" target="_blank" rel="noopener">CC BY 4.0</a>.';
 const PHET_CACHE = 'znanie-phet';
 // yotta=false — симуляция не отправляет статистику разработчикам (Google Analytics и счётчик PhET);
 // allowLinks=false — из симуляции нельзя уйти по ссылке в интернет.
 const PHET_PARAMS = '?yotta=false&allowLinks=false';
 const labsFor = (docId) => (S.labs || []).filter((l) => l.topics.includes(docId));
-const labGrade = (l) => Math.min(...l.topics.map((t) => S.texts.find((d) => d.id === t)?.grade || 11));
+const labGrade = (l) => (l.topics.length ? Math.min(...l.topics.map((t) => S.texts.find((d) => d.id === t)?.grade || 11)) : null);
+const labTag = (l) => `${LAB_SUBJECTS[l.subject] || ''}${labGrade(l) ? ` · с ${labGrade(l)} класса` : ''}`;
 
 function viewLabs(id) {
   const lab = id && S.labs.find((l) => l.id === id);
   if (lab) {
     const topics = lab.topics.map((t) => S.texts.find((d) => d.id === t)).filter(Boolean);
     app.innerHTML = `
-    <a class="back" href="#/labs">← Все опыты</a>
-    <div class="ex-head"><h1>🧪 ${esc(lab.title)}</h1><span class="tag">${LAB_SUBJECTS[lab.subject]} · с ${labGrade(lab)} класса</span></div>
+    <a class="back" href="#/labs">← Все лаборатории</a>
+    <div class="ex-head"><h1>🧪 ${esc(lab.title)}</h1><span class="tag">${labTag(lab)}</span></div>
     <div class="info lab-task"><strong>Попробуй:</strong> ${esc(lab.task)}</div>
-    <div class="lab-frame"><iframe id="lab-frame" src="phet/${esc(lab.id)}.html${PHET_PARAMS}" title="Симуляция «${esc(lab.title)}»" allow="fullscreen" allowfullscreen loading="lazy"></iframe></div>
+    <div class="lab-frame"><iframe id="lab-frame" src="${esc(labSrc(lab))}" title="Симуляция «${esc(lab.title)}»" allow="fullscreen" allowfullscreen loading="lazy"></iframe></div>
     <div class="row">
       <button class="btn" data-action="lab-full">⛶ Во весь экран</button>
-      <a class="btn ghost" href="phet/${esc(lab.id)}.html${PHET_PARAMS}" target="_blank" rel="noopener">Открыть в отдельной вкладке</a>
+      <a class="btn ghost" href="${esc(labSrc(lab))}" target="_blank" rel="noopener">Открыть в отдельной вкладке</a>
       <button class="btn" data-action="ask-about" data-title="${esc(topics[0]?.title || lab.title)}">🦉 Обсудить с Совой</button>
     </div>
-    <h2>Темы в библиотеке</h2>
-    <div class="row">${topics.map((d) => `<a class="chip" href="#/library/${d.id}">${esc(d.title)} · ${d.grade} кл.</a>`).join('')}</div>
-    <p class="note">${PHET_CREDIT}</p>`;
+    ${topics.length ? `<h2>Темы в библиотеке</h2>
+    <div class="row">${topics.map((d) => `<a class="chip" href="#/library/${d.id}">${esc(d.title)} · ${d.grade} кл.</a>`).join('')}</div>` : ''}
+    <p class="note">${labCredit(lab)}</p>`;
     return;
   }
   const f = (S.labFilter ||= 'all');
-  const list = S.labs.filter((l) => f === 'all' || l.subject === f).sort((a, b) => labGrade(a) - labGrade(b));
+  const subjects = Object.entries(LAB_SUBJECTS).filter(([k]) => S.labs.some((l) => l.subject === k));
+  const list = S.labs.filter((l) => f === 'all' || l.subject === f).sort((a, b) => (b.own ? 1 : 0) - (a.own ? 1 : 0) || (labGrade(a) || 99) - (labGrade(b) || 99));
   app.innerHTML = `
-  <h1>Опыты</h1>
-  <p class="muted">Интерактивные лаборатории: меняй условия и смотри, что получится. К каждому опыту есть задание и ссылки на темы библиотеки. Всё работает без интернета.</p>
+  <h1>Интерактивные лаборатории (PhET)</h1>
+  <p class="muted">Меняй условия и смотри, что получится. К каждой лаборатории есть задание и ссылки на темы библиотеки. Всё работает без интернета. ${S.server ? 'Учитель может положить любой скачанный HTML-файл PhET в папку <code>web/sims/</code> на Коробке — он появится здесь сам.' : ''}</p>
   <div class="row" role="group" aria-label="Предмет">
-    ${[['all', 'Все'], ...Object.entries(LAB_SUBJECTS)].map(([k, v]) => `<button class="chip${f === k ? ' graph' : ''}" data-action="lab-filter" data-f="${k}" aria-pressed="${f === k}">${v}</button>`).join('')}
+    ${[['all', 'Все'], ...subjects].map(([k, v]) => `<button class="chip${f === k ? ' graph' : ''}" data-action="lab-filter" data-f="${k}" aria-pressed="${f === k}">${v}</button>`).join('')}
   </div>
   <div class="cards">${list.map((l) => `
     <a class="card lab-card" href="#/labs/${esc(l.id)}">
-      <span class="tag">${LAB_SUBJECTS[l.subject]} · с ${labGrade(l)} класса</span>
+      <span class="tag">${labTag(l)}${l.own ? ' · ★ своя' : ''}</span>
       <strong>${esc(l.title)}</strong>
       <span class="muted">${esc(l.task)}</span>
     </a>`).join('')}</div>
   ${S.server ? '' : `<section class="step lab-save">
     <h3>📥 Сохранить опыты на это устройство</h3>
-    <p class="muted small">Обычно опыт сохраняется, когда его открывают в первый раз. Чтобы заранее сохранить все ${S.labs.length} (около 95 МБ), нажми кнопку, пока есть интернет.</p>
+    <p class="muted small">Обычно опыт сохраняется, когда его открывают в первый раз. Чтобы заранее сохранить все ${S.labs.filter((l) => !l.src).length} опытов PhET (около 95 МБ), нажми кнопку, пока есть интернет.</p>
     <button class="btn" data-action="labs-save" id="labs-save">Сохранить все опыты</button> <span id="labs-save-status" class="muted small" role="status"></span>
   </section>`}
-  <p class="note">${PHET_CREDIT}</p>`;
+  <p class="note">${PHET_CREDIT} Лаборатории со знаком ★ сделаны для «Знания в коробке».</p>`;
   if (!S.server) labsSavedCount().then((n) => {
     const el = document.getElementById('labs-save-status');
-    if (el && n) el.textContent = n === S.labs.length ? '✓ Все опыты уже сохранены' : `Сохранено ${n} из ${S.labs.length}`;
+    const all = S.labs.filter((l) => !l.src).length;
+    if (el && n) el.textContent = n === all ? '✓ Все опыты уже сохранены' : `Сохранено ${n} из ${all}`;
   });
 }
 
@@ -894,7 +1130,7 @@ async function labsSavedCount() {
   try {
     const c = await caches.open(PHET_CACHE);
     const keys = new Set((await c.keys()).map((r) => new URL(r.url).pathname.split('/').pop()));
-    return S.labs.filter((l) => keys.has(`${l.id}.html`)).length;
+    return S.labs.filter((l) => !l.src && keys.has(`${l.id}.html`)).length;
   } catch { return 0; }
 }
 
@@ -905,7 +1141,7 @@ async function saveAllLabs(btn) {
   const c = await caches.open(PHET_CACHE);
   let ok = 0;
   let failed = 0;
-  for (const l of S.labs) {
+  for (const l of S.labs.filter((x) => !x.src)) {
     const url = new URL(`phet/${l.id}.html`, location.href).href;
     try {
       if (!(await c.match(url))) {
@@ -1164,6 +1400,7 @@ async function extractGraph(text) {
 
 // ---------- обработчики ----------
 const actions = {
+  'connect-ai': () => connectLocalAI(true),
   'chat-mode': (d) => { S.chat.mode = d.mode; S.chat.quiz = null; viewSova(); },
   'ask-example': (d) => sendChat(d.q),
   'lib-grade': (d) => { S.lf.grade = d.g; viewLibrary(location.hash.split('/')[2]); },
@@ -1207,9 +1444,27 @@ const actions = {
     S.chat.messages.push({ role: 'assistant', text: 'Спасибо! Я записала этот случай — учитель проверит ответ. Ты молодец, что проверяешь ИИ.' });
     viewSova();
   },
+  'close-inspect': () => { S.ex.inspect = null; drawPanel(); },
+  'scenario-apply': () => {
+    const x = S.ex;
+    x.changes = { ...x.changes, ...x.parsed.changes };
+    x.tool = 'predict';
+    x.selected = null;
+    x.parsed = null;
+    drawExploreGraph(); drawPanel();
+  },
+  'scenario-idea': () => {
+    S.ideaDraft = { gid: S.ex.graphId, label: S.ex.parsed.text.replace(/^(а\s+)?что,?\s*если\s*/i, '').replace(/\?$/, '').slice(0, 60), hypothesis: '' };
+    S.ex.ideaOpen = true;
+    S.ex.parsed = null;
+    drawPanel();
+    document.querySelector('.idea-box')?.scrollIntoView({ block: 'start', behavior: reduceMotion() ? 'auto' : 'smooth' });
+  },
+  'idea-check': (d) => checkIdea(d.g, d.id),
+  'idea-del': (d) => { saveIdeas(d.g, ideasOf(d.g).filter((i) => i.id !== d.id)); refreshIdeaViews(d.g); },
   'toggle-text': () => { S.ex.showText = !S.ex.showText; viewExplore(S.ex.graphId); },
   scenario: (d) => {
-    const g = graphById(S.ex.graphId);
+    const g = exGraph();
     const s = g.scenarios[Number(d.i)];
     S.ex.changes = { ...s.changes };
     S.ex.tool = 'predict';
@@ -1494,6 +1749,8 @@ app.addEventListener('change', (ev) => {
 app.addEventListener('submit', (ev) => {
   ev.preventDefault();
   const form = ev.target;
+  if (form.dataset.form === 'scenario') interpretScenario(form.q.value);
+  if (form.dataset.form === 'idea') addIdea(form);
   if (form.dataset.form === 'chat') { const v = form.q.value; form.q.value = ''; sendChat(v); }
   if (form.dataset.form === 'pin-change') changePin(form);
   if (form.dataset.form === 'key') { const v = form.key.value; form.key.value = ''; saveKey(form.dataset.p, v); }
@@ -1549,6 +1806,7 @@ document.addEventListener('click', (ev) => {
 });
 document.addEventListener('keydown', (ev) => {
   if (ev.key !== 'Escape') return;
+  if (S.ex?.fs && location.hash.startsWith('#/explore')) toggleFullscreen(false);
   closeDrawer();
   document.getElementById('status-pop').hidden = true;
 });
