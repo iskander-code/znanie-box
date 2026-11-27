@@ -318,6 +318,8 @@ class OnlineTest(unittest.TestCase):
         self.assertEqual(h3["x-goog-api-key"], "k-g")
         self.assertIn(":streamGenerateContent", p3)
         self.assertEqual(b3["systemInstruction"]["parts"][0]["text"], "Ты — Сова.\n\nЗакончи вопросом.")
+        self.assertIn("/models/gemini-4-hydrogen:", p3, "модель Gemini по умолчанию")
+        self.assertEqual(b3["generationConfig"]["thinkingConfig"], {"thinkingLevel": "low"})
 
     def test_model_can_be_changed_by_env(self):
         with self.keys(ZNANIE_CLAUDE_MODEL="claude-haiku-5-5"):

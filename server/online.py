@@ -6,7 +6,7 @@
 Ключи берутся только из переменных окружения на коробке, на страницу они не попадают:
   ANTHROPIC_API_KEY   Claude    модель: ZNANIE_CLAUDE_MODEL  (по умолчанию claude-opus-5-5)
   OPENAI_API_KEY      GPT       модель: ZNANIE_OPENAI_MODEL  (по умолчанию gpt-5-mini)
-  GEMINI_API_KEY      Gemini    модель: ZNANIE_GEMINI_MODEL  (по умолчанию gemini-2.5-flash)
+  GEMINI_API_KEY      Gemini    модель: ZNANIE_GEMINI_MODEL  (по умолчанию gemini-4-hydrogen)
 
 Запросы идут напрямую по HTTPS стандартной библиотекой Python — как и весь сервер,
 без внешних пакетов (коробка ставится без pip и без интернета).
@@ -28,7 +28,7 @@ PROVIDERS = {
                "url": os.environ.get("ZNANIE_CLAUDE_URL", "https://api.anthropic.com")},
     "openai": {"name": "GPT", "key": "OPENAI_API_KEY", "model_env": "ZNANIE_OPENAI_MODEL", "model": "gpt-5-mini",
                "url": os.environ.get("ZNANIE_OPENAI_URL", "https://api.openai.com")},
-    "gemini": {"name": "Gemini", "key": "GEMINI_API_KEY", "model_env": "ZNANIE_GEMINI_MODEL", "model": "gemini-2.5-flash",
+    "gemini": {"name": "Gemini", "key": "GEMINI_API_KEY", "model_env": "ZNANIE_GEMINI_MODEL", "model": "gemini-4-hydrogen",
                "url": os.environ.get("ZNANIE_GEMINI_URL", "https://generativelanguage.googleapis.com")},
 }
 
@@ -124,8 +124,11 @@ def _gemini(messages: list[dict]):
     m = model_of("gemini")
     system, dialog = _split_system(messages)
     config = {"maxOutputTokens": MAX_TOKENS}
-    if "flash" in m:
-        config["thinkingConfig"] = {"thinkingBudget": 0}  # у Flash рассуждение можно выключить: ответ быстрее
+    if m.startswith(("gemini-3", "gemini-4")):
+        # Уровни рассуждения low / medium / high (по умолчанию) / xhigh; для короткого школьного ответа хватает low.
+        config["thinkingConfig"] = {"thinkingLevel": "low"}
+    elif "flash" in m:
+        config["thinkingConfig"] = {"thinkingBudget": 0}  # у Gemini 2.5 Flash рассуждение можно выключить
     body = {
         "contents": [{"role": "model" if x["role"] == "assistant" else "user", "parts": [{"text": x["content"]}]} for x in dialog],
         "generationConfig": config,
