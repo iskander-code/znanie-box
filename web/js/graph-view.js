@@ -112,7 +112,7 @@ export function renderGraph(container, graph, opts = {}) {
     if (!a || !b) return;
     const { d, mx, my } = edgePath(a, b, L.back.has(e), bottom);
     const hl = opts.highlightEdges?.has(e);
-    const cls = `edge ${e.sign > 0 ? 'pos' : 'neg'}${hl ? ' hl' : ''}${opts.dimEdges && !hl ? ' dim' : ''}`;
+    const cls = `edge ${e.sign > 0 ? 'pos' : 'neg'}${hl ? ' hl' : ''}${opts.dimEdges && !hl ? ' dim' : ''}${e.verified === false ? ' unverified' : ''}`;
     const marker = hl ? 'hl' : e.sign > 0 ? 'pos' : 'neg';
     parts.push(`<g class="${cls}" data-edge="${i}"><path class="edge-hit" d="${d}"/><path class="edge-line" d="${d}" marker-end="url(#arr-${marker})"/>`);
     if (!opts.hideSigns) parts.push(`<circle cx="${mx}" cy="${my}" r="10" class="edge-badge"/><text x="${mx}" y="${my + 4.5}" class="edge-sign">${e.sign > 0 ? '+' : '−'}</text>`);

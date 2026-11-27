@@ -18,7 +18,7 @@
 </head>
 <body>
   <header class="top">
-    <a class="brand" href="#/"><span class="logo" aria-hidden="true">▣</span> Знание в коробке</a>
+    <a class="brand" href="#/" aria-label="Знание в коробке — на главную"><span class="logo" aria-hidden="true">▣</span><span class="brand-text">Знание в коробке</span></a>
     <nav class="nav" aria-label="Разделы">
       <a href="#/sova" data-view="sova">Сова</a>
       <a href="#/explore" data-view="explore">Что будет, если…</a>
@@ -28,10 +28,35 @@
       <a href="#/teacher" data-view="teacher">Учителю</a>
       <a href="#/connect" data-view="connect">Как подключить</a>
     </nav>
-    <span id="theme-slot"></span>
-    <span id="offline" class="status" hidden></span>
-    <span id="status" class="status">…</span>
+    <div class="top-right">
+      <span id="theme-slot" class="theme-slot"></span>
+      <button id="status" class="status" type="button" aria-expanded="false" aria-controls="status-pop"><span class="dot" aria-hidden="true"></span><span class="status-text">…</span></button>
+      <button id="burger" class="burger" type="button" aria-expanded="false" aria-controls="drawer" aria-label="Открыть меню">☰</button>
+    </div>
+    <div id="status-pop" class="status-pop" role="dialog" aria-label="Состояние" hidden></div>
   </header>
+  <div id="drawer" class="drawer" hidden>
+    <div class="drawer-panel" role="dialog" aria-modal="true" aria-label="Меню">
+      <div class="drawer-head"><strong>Меню</strong><button type="button" class="burger" data-close-drawer aria-label="Закрыть меню">✕</button></div>
+      <nav class="drawer-nav" aria-label="Разделы">
+      <a href="#/sova" data-view="sova"><span aria-hidden="true">🦉</span> Сова</a>
+      <a href="#/explore" data-view="explore"><span aria-hidden="true">🔀</span> Что будет, если…</a>
+      <a href="#/build" data-view="build"><span aria-hidden="true">🧩</span> Собери сам</a>
+      <a href="#/labs" data-view="labs"><span aria-hidden="true">🧪</span> Опыты</a>
+      <a href="#/library" data-view="library"><span aria-hidden="true">📚</span> Библиотека</a>
+      <a href="#/teacher" data-view="teacher"><span aria-hidden="true">👩‍🏫</span> Учителю</a>
+      <a href="#/connect" data-view="connect"><span aria-hidden="true">📱</span> Как подключить</a>
+      </nav>
+      <div class="drawer-theme"><span class="muted small">Оформление</span><span id="theme-slot-drawer"></span></div>
+    </div>
+  </div>
+  <nav class="tabbar" aria-label="Главные разделы">
+    <a href="#/sova" data-view="sova"><span class="ti" aria-hidden="true">🦉</span><span>Сова</span></a>
+    <a href="#/explore" data-view="explore"><span class="ti" aria-hidden="true">🔀</span><span>Схемы</span></a>
+    <a href="#/labs" data-view="labs"><span class="ti" aria-hidden="true">🧪</span><span>Опыты</span></a>
+    <a href="#/library" data-view="library"><span class="ti" aria-hidden="true">📚</span><span>Книги</span></a>
+    <button type="button" class="tab-more" data-open-drawer aria-label="Все разделы"><span class="ti" aria-hidden="true">☰</span><span>Ещё</span></button>
+  </nav>
   <main id="app" tabindex="-1"><p class="muted">Загрузка…</p></main>
   <footer class="foot">Прототип для конкурса ИИ-решений · работает без интернета · данные учеников не покидают устройство</footer>
   <script type="module" src="js/app.js"></script>

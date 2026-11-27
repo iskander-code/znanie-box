@@ -48,23 +48,24 @@ class GraphValidationTest(unittest.TestCase):
         self.assertTrue(evidence_found("чем теплее вода тем меньше кислорода", self.TEXT))
         self.assertFalse(evidence_found("рыбы любят тёплую воду и солнце", self.TEXT))
 
-    def test_validate_drops_unsupported_edges(self):
+    def test_validate_keeps_unverified_edges_for_teacher(self):
         raw = {
             "title": "Вода",
             "nodes": [{"id": "t", "label": "Температура воды"}, {"id": "o2", "label": "Кислород"}, {"id": "x", "label": "Солнце"}],
             "edges": [
-                {"from": "t", "to": "o2", "sign": -1, "strength": 2, "delay": 0, "evidence": "Чем теплее вода, тем меньше кислорода"},
+                {"from": "t", "to": "o2", "sign": -1, "strength": 2, "delay": 0, "evidence": "«Чем теплее вода — тем меньше кислорода»"},
                 {"from": "x", "to": "t", "sign": 1, "strength": 2, "delay": 0, "evidence": "солнце нагревает воду летом"},
                 {"from": "t", "to": "zz", "sign": 1, "strength": 2, "delay": 0, "evidence": "Рыбам становится труднее"},
             ],
         }
         g, notes = validate(raw, self.TEXT)
-        self.assertEqual([(e["from"], e["to"]) for e in g["edges"]], [("t", "o2")])
-        self.assertEqual({n["id"] for n in g["nodes"]}, {"t", "o2"})
-        self.assertTrue(g["nodes"][0].get("adjustable"))
-        self.assertEqual(len(notes), 3)
+        self.assertEqual([(e["from"], e["to"], e["verified"]) for e in g["edges"]], [("t", "o2", True), ("x", "t", False)],
+                         "неточная цитата не удаляет связь, а помечает её; связь на несуществующий узел убрана")
+        self.assertEqual(g["edges"][1]["review"], "фактор «Солнце» не упоминается в тексте")
+        self.assertIn("Подтверждено текстом: 1 из 2", notes[0])
+        self.assertTrue(any("несуществующий узел" in n for n in notes))
 
-    def test_validate_drops_quote_about_other_factors(self):
+    def test_validate_flags_quote_about_other_factors(self):
         text = ("Вырубка лесов уменьшает количество деревьев, которые поглощают углекислый газ. "
                 "Поэтому в атмосфере накапливается больше углекислого газа. Из-за эрозии почвы снижаются урожаи.")
         raw = {
@@ -78,8 +79,33 @@ class GraphValidationTest(unittest.TestCase):
             ],
         }
         g, notes = validate(raw, text)
-        self.assertEqual([(e["from"], e["to"]) for e in g["edges"]], [("trees", "co2"), ("erosion", "crop")])
-        self.assertIn("обоих факторах", notes[0])
+        self.assertEqual([e["verified"] for e in g["edges"]], [True, False, True])
+        self.assertEqual(g["edges"][1]["review"], "цитата не говорит об обоих факторах")
+
+    def test_online_model_builds_schema_from_json_reply(self):
+        from unittest import mock
+        import graphs
+        reply = '```json\n{"title": "Вода", "nodes": [{"id": "t", "label": "Температура воды"}, {"id": "o2", "label": "Кислород"}], ' \
+                '"edges": [{"from": "t", "to": "o2", "sign": -1, "strength": 2, "delay": 0, "evidence": "Чем теплее вода, тем меньше кислорода"}]}\n```'
+        with mock.patch.object(graphs.llm, "provider", return_value="gemini"), mock.patch.object(graphs.llm, "ask", return_value=reply) as ask, \
+                mock.patch.object(graphs, "chat", side_effect=AssertionError("локальная модель не нужна")):
+            g, _ = graphs.extract(self.TEXT)
+        self.assertIn("JSON", ask.call_args[0][0][0]["content"])
+        self.assertEqual([(e["from"], e["to"], e["verified"]) for e in g["edges"]], [("t", "o2", True)])
+
+    def test_validate_descriptive_history_text(self):
+        """Описательный текст и слегка изменённые моделью цитаты — схема не пустая."""
+        text = ("Великий шёлковый путь проходил через юг Казахстана. Благодаря торговле на нём выросли города Отрар и Тараз. "
+                "Купцы привозили шёлк и пряности, а вместе с ними распространялись знания и религии.")
+        raw = {"title": "Шёлковый путь", "nodes": [{"id": "trade", "label": "Торговля"}, {"id": "cities", "label": "Рост городов"},
+                                                   {"id": "know", "label": "Распространение знаний"}],
+               "edges": [{"from": "trade", "to": "cities", "sign": 1, "strength": 3, "delay": 1, "evidence": "Благодаря торговле выросли города"},
+                         {"from": "trade", "to": "know", "sign": 1, "strength": 2, "delay": 2, "evidence": "вместе с купцами распространялись знания"}]}
+        g, _ = validate(raw, text)
+        self.assertEqual(len(g["edges"]), 2, "схема не пустая: обе связи на черновике")
+        self.assertTrue(g["edges"][0]["verified"], "цитата с другими окончаниями засчитана")
+        # Во втором предложении говорится о купцах, а не о «торговле» — связь остаётся, но на проверку учителю.
+        self.assertFalse(g["edges"][1]["verified"])
 
 
 class TeacherTest(unittest.TestCase):
@@ -122,6 +148,8 @@ class ServerTest(unittest.TestCase):
         cls.server = server
         cls.tmp = tempfile.TemporaryDirectory()
         server.TEACHER = Teacher(Path(cls.tmp.name) / "state.json")
+        from cache import AnswerCache
+        server.CACHE = AnswerCache(Path(cls.tmp.name) / "cache.sqlite")
         cls.httpd = ThreadingHTTPServer(("127.0.0.1", 0), partial(server.Handler, directory=str(server.WEB)))
         cls.base = f"http://127.0.0.1:{cls.httpd.server_address[1]}"
         threading.Thread(target=cls.httpd.serve_forever, daemon=True).start()
@@ -200,6 +228,7 @@ class ServerTest(unittest.TestCase):
             self.assertEqual("".join(x["text"] for x in lines if x["type"] == "delta"), "".join(pieces))
             self.assertEqual(lines[-1]["answer"], "Подумай, почему уровень упал?")
             # Подсказка без вопроса заменяется проверенным шаблоном: answer = None.
+            self.server.CACHE.clear()  # тот же вопрос иначе пришёл бы из кэша
             pieces = ["Уровень упал из-за орошения."]
             _, lines = self.stream({"message": "Почему высохло Аральское море?", "mode": "socratic", "level": 0})
             self.assertIsNone(lines[-1]["answer"])
@@ -208,7 +237,7 @@ class ServerTest(unittest.TestCase):
             _, lines = self.stream({"message": "Почему небо голубое?", "mode": "socratic", "level": 0})
             self.assertTrue(lines[0]["general"])
             self.assertEqual(lines[-1]["answer"], "Из-за рассеяния света.")
-        self.assertEqual(calls, [160, 160, 350], "подсказка короче объяснения")
+        self.assertEqual(calls, [160, 160, 450], "подсказка короче ответа ученику (450 токенов)")
 
     def test_teacher_endpoints_need_pin(self):
         self.assertEqual(self.status("/api/settings", {"exam": True}), 403)
@@ -236,6 +265,59 @@ class ServerTest(unittest.TestCase):
                 self.assertEqual(r["level"], 1, "сервер понижает уровень до подсказки")
         finally:
             self.post("/api/settings", {"exam": False}, token)
+
+    def test_same_question_is_answered_from_cache(self):
+        from unittest import mock
+        import time as _time
+        llm = self.server.llm
+        calls = []
+
+        def fake_stream(msgs, max_tokens=None):
+            calls.append(max_tokens)
+            yield from ["Подумай, ", "что такое сопротивление?"]
+
+        q = {"message": "Что такое закон Ома?", "mode": "socratic", "level": 0, "grade": 8}
+        with mock.patch.object(llm, "model", return_value="fake-cache"), mock.patch.object(llm, "chat_stream", fake_stream):
+            _, first = self.stream(q)
+            t0 = _time.perf_counter()
+            _, second = self.stream(q)
+            dt = _time.perf_counter() - t0
+            r = self.post("/api/chat", q)  # и обычный запрос без потока
+        self.assertEqual(len(calls), 1, "повторный вопрос не идёт в нейросеть")
+        self.assertEqual(calls[0], 160, "подсказка короче объяснения")
+        self.assertTrue(second[0].get("cached") and second[-1]["answer"] == first[-1]["answer"])
+        self.assertTrue(r.get("cached"))
+        self.assertLess(dt, 0.5)
+        token = self.post("/api/teacher/login", {"pin": "2026"})["token"]
+        self.assertGreaterEqual(self.post("/api/teacher/clear-cache", {}, token)["removed"], 1)
+
+    def test_change_pin_and_simulation_analytics(self):
+        token = self.post("/api/teacher/login", {"pin": "2026"})["token"]
+        self.assertEqual(self.status("/api/teacher/pin", {"old": "2026", "new": "4815"}), 403, "без входа PIN не сменить")
+        self.assertEqual(self.status("/api/teacher/pin", {"old": "1111", "new": "4815"}, token), 400, "нужен верный старый PIN")
+        self.assertEqual(self.status("/api/teacher/pin", {"old": "2026", "new": "12"}, token), 400)
+        try:
+            self.assertTrue(self.post("/api/teacher/pin", {"old": "2026", "new": "4815"}, token)["ok"])
+            self.assertEqual(self.status("/api/teacher/login", {"pin": "2026"}), 403, "старый PIN больше не подходит")
+            token = self.post("/api/teacher/login", {"pin": "4815"})["token"]
+            state = json.loads(self.server.TEACHER.file.read_text(encoding="utf-8"))
+            self.assertNotIn("4815", json.dumps(state), "в файле только хэш PIN")
+        finally:
+            self.post("/api/teacher/pin", {"old": "4815", "new": "2026"}, token)
+        self.post("/api/report-sim", {"graphId": "aral", "title": "Арал", "total": 3, "wrong": ["Солёность воды"]})
+        self.post("/api/report-sim", {"graphId": "aral", "title": "Арал", "total": 2, "wrong": ["Солёность воды", "Рыба в море"]})
+        req = urllib.request.Request(self.base + "/api/teacher/summary", headers={"X-Teacher-Token": token})
+        with urllib.request.urlopen(req, timeout=10) as r:
+            sims = json.loads(r.read())["sims"]
+        aral = next(x for x in sims if x["graphId"] == "aral")
+        self.assertEqual((aral["runs"], aral["predictions"], aral["wrong"], aral["errorRate"]), (2, 5, 3, 0.6))
+        self.assertEqual(aral["hardest"][0], "Солёность воды")
+
+    def test_context_from_library_is_capped(self):
+        long = [{"title": f"Тема {i}", "text": "слово " * 400} for i in range(3)]
+        system = self.server.tutor_messages({"message": "?", "mode": "explain"}, long)[0]["content"]
+        context = system.split("ФРАГМЕНТЫ:\n", 1)[1]
+        self.assertLessEqual(len(context), 1500 + 10)
 
     def test_teacher_ai_answers_any_question_from_model_knowledge(self):
         from unittest import mock

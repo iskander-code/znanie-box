@@ -25,6 +25,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import llm  # noqa: E402
+from cache import AnswerCache  # noqa: E402
 import tts  # noqa: E402
 from graphs import extract  # noqa: E402
 from rag import Library, is_relevant  # noqa: E402
@@ -35,6 +36,7 @@ WEB = ROOT / "web"
 USER_GRAPHS = ROOT / "data" / "user_graphs"
 LIB = Library(WEB / "data" / "library")
 TEACHER = Teacher(ROOT / "data" / "state.json")
+CACHE = AnswerCache(ROOT / "data" / "cache.sqlite")
 MAX_BODY = 200_000
 EXAM_GENERAL = "Сейчас идёт контрольная: Сова помогает только подсказками по темам школьной библиотеки. Попробуй спросить про тему из учебника."
 
@@ -86,7 +88,8 @@ TEACHER_AI = (
 
 # Предел длины ответа в токенах: подсказка короткая, объяснение длиннее. Обычные ответы короче предела,
 # он лишь не даёт модели «заговориться» — на слабом устройстве это десятки секунд.
-MAX_TOKENS = {"hint": 160, "answer": 350, "general": 350, "debrief": 400, "teacher": 1500}
+MAX_TOKENS = {"hint": 160, "answer": 450, "general": 450, "debrief": 400, "teacher": 1500}
+MAX_CONTEXT = 1500  # в подсказку модели — не больше 1500 символов из библиотеки (3 самых подходящих фрагмента)
 DEBRIEF = (
     "Ты — Сова, наставник школьника. Ученик сделал прогноз и запустил симуляцию причинно-следственной схемы. "
     "Разбери результат по-русски, не больше 7 предложений. Похвали верные догадки. Для каждой ошибки объясни "
@@ -95,11 +98,20 @@ DEBRIEF = (
 )
 
 
+def _context_block(fragments: list[dict], limit: int = MAX_CONTEXT) -> str:
+    """Фрагменты библиотеки для подсказки модели, не длиннее limit символов: чем короче подсказка, тем быстрее ответ."""
+    lines = [f"[{f['title']}] {f['text']}" for f in fragments]
+    if sum(len(x) for x in lines) <= limit:
+        return "\n".join(lines)
+    share = max(120, limit // max(1, len(lines)))
+    return "\n".join(x if len(x) <= share else x[: share - 1].rsplit(" ", 1)[0] + "…" for x in lines)
+
+
 def tutor_messages(body: dict, fragments: list[dict]) -> list[dict]:
     mode = body.get("mode", "socratic")
     level = int(body.get("level", 0)) if mode == "socratic" else 0
     instruction = MODES.get((mode, min(level, 2)), MODES[("socratic", 0)])
-    context = "\n".join(f"[{f['title']}] {f['text']}" for f in fragments)
+    context = _context_block(fragments[:3])
     system = SYSTEM.format(grade=body.get("grade", 8)) + "\n" + instruction + "\n\nФРАГМЕНТЫ:\n" + context
     history = [m for m in body.get("history", [])[-6:] if m.get("role") in ("user", "assistant")]
     msgs = [{"role": "system", "content": system}, *history, {"role": "user", "content": str(body.get("message", ""))[:1000]}]
@@ -210,7 +222,7 @@ class Handler(SimpleHTTPRequestHandler):
         if path == "/api/teacher/summary":
             if not self._teacher():
                 return self._denied()
-            return self._json({"topics": TEACHER.summary()})
+            return self._json({"topics": TEACHER.summary(), "sims": TEACHER.sims_summary()})
         if path == "/api/graphs":
             USER_GRAPHS.mkdir(parents=True, exist_ok=True)
             graphs = [json.loads(p.read_text(encoding="utf-8")) for p in sorted(USER_GRAPHS.glob("*.json"))]
@@ -264,6 +276,10 @@ class Handler(SimpleHTTPRequestHandler):
                     return self._json({"ok": True, "reply": "ключ работает (модель отказалась от пробного вопроса)"})
                 except Exception as e:  # noqa: BLE001 — показываем учителю причину простыми словами
                     return self._json({"ok": False, "error": llm.online.describe(e)})
+            if path == "/api/teacher/clear-cache":
+                if not self._teacher():
+                    return self._denied()
+                return self._json({"ok": True, "removed": CACHE.clear()})
             if path == "/api/teacher/ask":
                 if not self._teacher():
                     return self._denied()
@@ -278,6 +294,16 @@ class Handler(SimpleHTTPRequestHandler):
                 if is_relevant(fr):
                     TEACHER.record(fr[0]["docId"], fr[0]["title"], "report")
                 return self._json({"ok": True})
+            if path == "/api/report-sim":
+                # Обезличенно: какая схема, сколько факторов в прогнозе, какие не угадали.
+                wrong = [str(x)[:60] for x in body.get("wrong", [])][:20]
+                TEACHER.record_sim(str(body.get("graphId", ""))[:60], str(body.get("title", ""))[:80], int(body.get("total", 0) or 0), wrong)
+                return self._json({"ok": True})
+            if path == "/api/teacher/pin":
+                if not self._teacher():
+                    return self._denied()
+                ok, msg = TEACHER.change_pin(str(body.get("old", "")), str(body.get("new", "")))
+                return self._json({"ok": ok, "message": msg}, HTTPStatus.OK if ok else HTTPStatus.BAD_REQUEST)
             if path == "/api/tts":
                 if not tts.available():
                     return self._json({"error": "Piper не установлен"}, HTTPStatus.NOT_IMPLEMENTED)
@@ -294,9 +320,12 @@ class Handler(SimpleHTTPRequestHandler):
                 text = str(body.get("text", "")).strip()
                 if len(text) < 80:
                     return self._json({"error": "Вставьте текст параграфа хотя бы из нескольких предложений"}, HTTPStatus.BAD_REQUEST)
-                if not llm.model():
-                    return self._json({"error": "Нейросеть не запущена. Запустите Ollama или задайте OLLAMA_API_KEY."}, HTTPStatus.SERVICE_UNAVAILABLE)
-                graph, notes = extract(text[:6000])
+                if not llm.available():
+                    return self._json({"error": "Нейросеть не запущена: запустите Ollama или задайте ключ онлайн-нейросети в «Настройках Коробки»."}, HTTPStatus.SERVICE_UNAVAILABLE)
+                try:
+                    graph, notes = extract(text[:6000])
+                except RuntimeError as e:
+                    return self._json({"error": str(e)}, HTTPStatus.SERVICE_UNAVAILABLE)
                 return self._json({"graph": graph, "notes": notes})
             if path == "/api/graphs":
                 if not self._teacher():
@@ -323,7 +352,8 @@ class Handler(SimpleHTTPRequestHandler):
 
     def _settings(self) -> dict:
         return {"exam": TEACHER.exam, "provider": llm.provider(), "providers": llm.online.available(),
-                "online": llm.online.status(), "model": llm.label(), "llm": llm.available(), "localModel": llm.model()}
+                "online": llm.online.status(), "model": llm.label(), "llm": llm.available(), "localModel": llm.model(),
+                "cache": CACHE.stats()}
 
     def _chat(self, body: dict):
         mode = body.get("mode", "socratic")
@@ -356,26 +386,39 @@ class Handler(SimpleHTTPRequestHandler):
             msgs = [{"role": "system", "content": GENERAL.format(grade=body.get("grade", 8))}, *history,
                     {"role": "user", "content": str(body.get("message", ""))[:1000]}]
             meta = {"fragments": [], "general": True, "llm": True, "model": llm.label(), "exam": exam}
-            return self._answer(meta, msgs, MAX_TOKENS["general"], False, stream)
+            return self._answer(meta, msgs, MAX_TOKENS["general"], False, stream, cache=True)
         hint = mode == "socratic" and int(body.get("level", 0)) < 2
         meta = {"fragments": fragments, "llm": True, "model": llm.label(), "exam": exam, "level": body.get("level", 0)}
-        return self._answer(meta, tutor_messages(body, fragments[:3]), MAX_TOKENS["hint" if hint else "answer"], hint, stream)
+        return self._answer(meta, tutor_messages(body, fragments[:3]), MAX_TOKENS["hint" if hint else "answer"], hint, stream, cache=True)
 
-    def _answer(self, meta: dict, msgs: list[dict], max_tokens: int, must_ask: bool, stream: bool):
+    def _answer(self, meta: dict, msgs: list[dict], max_tokens: int, must_ask: bool, stream: bool, cache: bool = False):
         """Ответ нейросети целиком (JSON) или по мере печати (NDJSON: meta → delta… → done).
 
         must_ask: нужна подсказка-вопрос. Если модель выдала ответ без вопроса, answer = None —
         интерфейс покажет проверенную подсказку-шаблон.
+        cache: такой же вопрос уже задавали — отдать сохранённый ответ мгновенно, без нейросети.
         """
         def final(text: str) -> str | None:
             answer = clean_answer(text)
             return None if must_ask and "?" not in answer else answer
 
+        key = CACHE.key(meta.get("model"), msgs, max_tokens) if cache else None
+        cached = CACHE.get(key) if key else None
+
+        def remember(answer: str | None):
+            # Запасной ответ локальной модели и отказы не кэшируем: в следующий раз может ответить основная.
+            if key and answer and llm.FALLBACK_NOTE.strip() not in answer and answer != llm.REFUSED_TEXT:
+                CACHE.put(key, answer)
+
         if not stream:
+            if cached:
+                return self._json({**meta, "answer": cached, "cached": True})
             try:
-                return self._json({**meta, "answer": final(llm.ask(msgs, max_tokens=max_tokens))})
+                answer = final(llm.ask(msgs, max_tokens=max_tokens))
             except llm.OnlineUnavailable as e:
                 return self._json({**meta, "answer": None, "note": str(e)})
+            remember(answer)
+            return self._json({**meta, "answer": answer})
         self.send_response(HTTPStatus.OK)
         self.send_header("Content-Type", "application/x-ndjson; charset=utf-8")
         self.send_header("Cache-Control", "no-store")
@@ -388,12 +431,22 @@ class Handler(SimpleHTTPRequestHandler):
             self.wfile.flush()
 
         parts = []
+        if cached:
+            try:
+                send({"type": "meta", **meta, "cached": True})
+                send({"type": "delta", "text": cached})
+                send({"type": "done", "answer": cached, "cached": True})
+            except (BrokenPipeError, ConnectionResetError):
+                pass
+            return None
         try:
             send({"type": "meta", **meta})
             for piece in llm.ask_stream(msgs, max_tokens=max_tokens):
                 parts.append(piece)
                 send({"type": "delta", "text": piece})
-            send({"type": "done", "answer": final("".join(parts))})
+            answer = final("".join(parts))
+            remember(answer)
+            send({"type": "done", "answer": answer})
         except llm.OnlineUnavailable as e:
             # Ни онлайн, ни локальной модели: интерфейс покажет подсказку-шаблон по библиотеке с пометкой.
             send({"type": "done", "answer": None, "note": str(e)})

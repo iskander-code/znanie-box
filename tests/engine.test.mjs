@@ -222,3 +222,17 @@ test('офлайн-кэш: при наличии сети — свежая ве�
   online = false;
   assert.equal(await get('http://box/js/app.js?v=2'), 'app новая', 'без сети — последняя сохранённая копия');
 });
+
+test('Markdown в ответах нейросети: заголовки, жирный, списки, код, таблицы — и без чужого HTML', async () => {
+  const { renderMarkdown, markdownToText } = await import('../web/js/markdown.js');
+  const html = renderMarkdown('### План урока\n**Цель:** понять *закон Ома*.\n\n1. Разминка\n2. Опыт\n   - амперметр\n- вывод\n\n`I = U / R`\n\n```\nU = I * R\n```\n| Шаг | Время |\n|---|---|\n| Опыт | 10 мин |\n\n<script>alert(1)</script>');
+  assert.match(html, /<h4>План урока<\/h4>/);
+  assert.match(html, /<strong>Цель:<\/strong> понять <em>закон Ома<\/em>\./);
+  assert.match(html, /<ol><li>Разминка<\/li><li>Опыт<ul><li>амперметр<\/li><\/ul><\/li><\/ol><ul><li>вывод<\/li><\/ul>/);
+  assert.match(html, /<code>I = U \/ R<\/code>/);
+  assert.match(html, /<pre class="md-code"><code>U = I \* R<\/code><\/pre>/);
+  assert.match(html, /<th>Шаг<\/th>/);
+  assert.ok(!html.includes('<script>'), 'HTML из ответа модели не выполняется');
+  assert.match(renderMarkdown('## Итог'), /<h3>Итог<\/h3>/);
+  assert.equal(markdownToText('### Итог\n**Важно**: *да*'), 'Итог\nВажно: да');
+});

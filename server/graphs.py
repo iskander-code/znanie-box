@@ -1,8 +1,11 @@
 """Извлечение причинно-следственного графа из текста и его проверка.
 
 Модель возвращает JSON по схеме (structured output Ollama). Затем код
-проверяет каждую связь: у неё должна быть цитата, которая действительно есть
-в исходном тексте. Связи без подтверждения отбрасываются.
+проверяет каждую связь: есть ли её цитата в исходном тексте (нечётко — модель
+меняет окончания, кавычки, регистр) и говорит ли цитата об обоих факторах.
+Связи не удаляются: подтверждённые текстом получают verified: true, остальные —
+verified: false и пометку «Требует проверки учителем». Учитель видит их на
+черновике пунктиром и сам решает, оставить или убрать.
 """
 from __future__ import annotations
 
@@ -10,6 +13,7 @@ import json
 import re
 from difflib import SequenceMatcher
 
+import llm
 from llm import chat
 
 GRAPH_SCHEMA = {
@@ -44,38 +48,76 @@ GRAPH_SCHEMA = {
 }
 
 EXTRACT_PROMPT = """Ты помогаешь учителю превратить параграф учебника в схему причин и следствий.
-Выдели 5–12 факторов (узлов). Узел — это величина, которая может расти или уменьшаться:
-«Уровень моря», «Доходы крестьян», «Инфляция». Не используй события как узлы.
-Для каждой связи укажи:
+
+Шаг 1. Выдели из ТЕКСТА 4–10 факторов (узлов). Фактор — это то, чего может стать больше или меньше,
+и назван он словами из ТЕКСТА (существительное из текста + «рост», «количество», «уровень» и т. п.).
+Не придумывай факторов, которых нет в ТЕКСТЕ. Не используй события как узлы.
+Даже если текст описательный (исторический или обзорный), найди в нём, что на что влияет.
+
+Шаг 2. Свяжи факторы. Для каждой связи укажи:
 - from, to — id узлов (латиница, коротко);
 - sign: 1, если рост from увеличивает to; -1, если уменьшает;
 - strength: 1 — слабая, 2 — средняя, 3 — сильная;
 - delay: 0 — сразу, 1 — через некоторое время, 2 — через долгое время;
-- evidence — ДОСЛОВНАЯ цитата из текста (5–15 слов), на которой основана связь.
-Не добавляй связей, которых нет в тексте.
-
-Пример: текст «Чем теплее вода, тем меньше в ней кислорода» →
-узлы t «Температура воды», o2 «Кислород в воде»; связь t→o2, sign -1, strength 2, delay 0,
-evidence «Чем теплее вода, тем меньше в ней кислорода».
+- evidence — точный фрагмент предложения из ТЕКСТА без изменений (5–15 слов), где говорится
+  именно об этих двух факторах. У разных связей — разные цитаты.
+Не добавляй связей, которых нет в ТЕКСТЕ. Ничего не бери из этой инструкции.
 
 ТЕКСТ:
 {text}"""
 
 
 def _norm(s: str) -> str:
-    return re.sub(r"\s+", " ", re.sub(r"[«»\"'.,;:!?()—–-]", " ", s.lower().replace("ё", "е"))).strip()
+    """Только буквы и цифры в нижнем регистре, слова через один пробел."""
+    return re.sub(r"\s+", " ", re.sub(r"[^0-9a-zа-я]+", " ", s.lower().replace("ё", "е"))).strip()
 
 
-def evidence_found(evidence: str, text: str, threshold: float = 0.8) -> bool:
-    """Цитата есть в тексте, допуская мелкие расхождения (падежи, пунктуация)."""
-    ev, tx = _norm(evidence), _norm(text)
+def _sentences(text: str) -> list[str]:
+    return [x.strip() for x in re.findall(r"[^.!?\n]+[.!?]?", text) if x.strip()]
+
+
+def _partial_ratio(short: str, long: str) -> float:
+    """Как rapidfuzz.partial_ratio: насколько короткая строка похожа на лучший кусок длинной (0–1)."""
+    if not short or not long:
+        return 0.0
+    if short in long:
+        return 1.0
+    if len(short) > len(long):
+        short, long = long, short
+    best = 0.0
+    m = SequenceMatcher(None, long, short, autojunk=False)
+    for block in m.get_matching_blocks():
+        start = max(0, block.a - block.b)
+        window = long[start:start + len(short)]
+        best = max(best, SequenceMatcher(None, window, short, autojunk=False).ratio())
+    return best
+
+
+def _stem_overlap(evidence: str, passage: str) -> float:
+    """Доля значимых слов цитаты (по началу слова), которые есть в отрывке."""
+    ev = _stems5(evidence)
+    return len(ev & _stems5(passage)) / len(ev) if ev else 0.0
+
+
+def evidence_score(evidence: str, text: str) -> tuple[float, str]:
+    """Насколько цитата совпадает с текстом (0–1) и самое похожее предложение текста."""
+    ev = _norm(evidence)
     if not ev:
-        return False
-    if ev in tx:
-        return True
-    m = SequenceMatcher(None, tx, ev, autojunk=False)
-    covered = sum(b.size for b in m.get_matching_blocks())
-    return covered / len(ev) >= threshold and m.find_longest_match(0, len(tx), 0, len(ev)).size >= len(ev) * 0.5
+        return 0.0, ""
+    best, best_sent = 0.0, ""
+    for sent in _sentences(text):
+        ns = _norm(sent)
+        score = max(_partial_ratio(ev, ns), _stem_overlap(evidence, sent))
+        if score > best:
+            best, best_sent = score, sent
+    if ev in _norm(text):
+        best = 1.0
+    return best, best_sent
+
+
+def evidence_found(evidence: str, text: str, threshold: float = 0.65) -> bool:
+    """Цитата есть в тексте с точностью до окончаний, кавычек, регистра и пунктуации."""
+    return evidence_score(evidence, text)[0] >= threshold
 
 
 def _stems5(s: str) -> set[str]:
@@ -98,7 +140,11 @@ def _context(evidence: str, text: str) -> str:
 
 
 def validate(raw: dict, text: str) -> tuple[dict, list[str]]:
-    """Чистит граф: убирает связи без цитаты, дубликаты, узлы-сироты. Возвращает граф и замечания."""
+    """Чистит граф: проверяет цитаты, убирает дубликаты и узлы-сироты. Возвращает граф и замечания.
+
+    Связь с неточной цитатой не удаляется, а помечается verified: false — её проверяет учитель.
+    Удаляются только связи на несуществующие узлы, петли и повторы.
+    """
     notes: list[str] = []
     nodes, seen = [], set()
     for n in raw.get("nodes", []):
@@ -108,8 +154,9 @@ def validate(raw: dict, text: str) -> tuple[dict, list[str]]:
         seen.add(nid)
         nodes.append({"id": nid, "label": str(n["label"]).strip()[:60], "_raw": n.get("id")})
     id_map = {n["_raw"]: n["id"] for n in nodes}
+    labels = {n["id"]: n["label"] for n in nodes}
 
-    edges, pairs = [], set()
+    edges, pairs, review = [], set(), 0
     for e in raw.get("edges", []):
         a, b = id_map.get(e.get("from")), id_map.get(e.get("to"))
         if not a or not b or a == b:
@@ -117,24 +164,37 @@ def validate(raw: dict, text: str) -> tuple[dict, list[str]]:
             continue
         if (a, b) in pairs:
             continue
-        evidence = str(e.get("evidence", ""))
-        if not evidence_found(evidence, text):
-            notes.append(f"Связь «{a}→{b}»: цитаты нет в тексте — убрана")
-            continue
-        labels = {n["id"]: n["label"] for n in nodes}
-        ctx = _context(evidence, text)
-        if not (mentions(labels[a], ctx) and mentions(labels[b], ctx)):
-            notes.append(f"Связь «{labels[a]} → {labels[b]}»: цитата не говорит об обоих факторах — убрана")
-            continue
         pairs.add((a, b))
-        edges.append({
+        evidence = str(e.get("evidence", "")).strip()
+        score, sentence = evidence_score(evidence, text)
+        if score < 0.3 and not mentions(labels[a], text) and not mentions(labels[b], text):
+            # Ни цитаты, ни факторов в тексте нет — связь придумана, а не взята из параграфа.
+            notes.append(f"Связь «{labels[a]} → {labels[b]}»: ни факторов, ни цитаты нет в тексте — убрана")
+            continue
+        passage = f"{sentence} {evidence}"
+        both = mentions(labels[a], passage) and mentions(labels[b], passage)
+        edge = {
             "from": a, "to": b,
             "sign": 1 if int(e.get("sign", 1)) >= 0 else -1,
             "strength": min(3, max(1, int(e.get("strength", 2)))),
             "delay": min(2, max(0, int(e.get("delay", 0)))),
-            "evidence": str(e["evidence"]).strip(),
-        })
+            "evidence": evidence,
+            "verified": score >= 0.65 and both,
+        }
+        if not edge["verified"]:
+            review += 1
+            missing = [labels[x] for x in (a, b) if not mentions(labels[x], text)]
+            edge["review"] = (f"фактор «{missing[0]}» не упоминается в тексте" if missing else
+                              "цитата не говорит об обоих факторах" if score >= 0.65 else
+                              "цитата не найдена в тексте дословно" if evidence else "нет цитаты")
+            if sentence and score >= 0.3:
+                edge["sourceSentence"] = sentence  # ближайшее предложение текста — подсказка учителю
+            notes.append(f"Связь «{labels[a]} → {labels[b]}»: {edge['review']} — требует проверки учителем")
+        edges.append(edge)
 
+    if review:
+        notes.insert(0, f"Подтверждено текстом: {len(edges) - review} из {len(edges)} связей. "
+                        f"Остальные {review} показаны пунктиром — проверьте их, поправьте или удалите.")
     used = {x for e in edges for x in (e["from"], e["to"])}
     removed = [n["label"] for n in nodes if n["id"] not in used]
     if removed:
@@ -160,6 +220,34 @@ def validate(raw: dict, text: str) -> tuple[dict, list[str]]:
     return graph, notes
 
 
+JSON_TAIL = """
+
+Ответь ТОЛЬКО JSON-объектом без пояснений и без ```, по схеме:
+{"title": "...", "nodes": [{"id": "...", "label": "..."}],
+ "edges": [{"from": "...", "to": "...", "sign": 1, "strength": 2, "delay": 0, "evidence": "..."}]}"""
+
+
+def _parse_json(content: str) -> dict:
+    """JSON из ответа онлайн-модели: убираем ```json-обёртку и текст вокруг объекта."""
+    content = content.strip()
+    start, end = content.find("{"), content.rfind("}")
+    if start < 0 or end < start:
+        raise ValueError("Нейросеть не вернула схему в формате JSON")
+    return json.loads(content[start:end + 1])
+
+
 def extract(text: str) -> tuple[dict, list[str]]:
-    content = chat([{"role": "user", "content": EXTRACT_PROMPT.format(text=text)}], fmt=GRAPH_SCHEMA, temperature=0.1)
+    """Строит схему выбранной нейросетью: онлайн (Claude, GPT, Gemini) или локальной через Ollama.
+
+    Ollama получает строгую JSON-схему (structured output), онлайн-модели — описание формата в подсказке.
+    Если онлайн-нейросеть недоступна, схему строит локальная модель.
+    """
+    prompt = EXTRACT_PROMPT.format(text=text)
+    if llm.provider() != "local":
+        try:
+            return validate(_parse_json(llm.ask([{"role": "user", "content": prompt + JSON_TAIL}])), text)
+        except (llm.OnlineUnavailable, ValueError) as e:
+            if not llm.model():
+                raise RuntimeError(f"Онлайн-нейросеть не построила схему: {e}") from e
+    content = chat([{"role": "user", "content": prompt}], fmt=GRAPH_SCHEMA, temperature=0.1)
     return validate(json.loads(content), text)

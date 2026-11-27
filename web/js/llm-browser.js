@@ -130,10 +130,18 @@ export async function warmUpBrowserLLM(model) {
   }
 }
 
+// Не больше 1500 символов из библиотеки: чем короче подсказка, тем быстрее ответ (как на коробке).
+export function contextBlock(fragments, limit = 1500) {
+  const lines = fragments.map((f) => `[${f.title}] ${f.text}`);
+  if (lines.reduce((s, x) => s + x.length, 0) <= limit) return lines.join('\n');
+  const share = Math.max(120, Math.floor(limit / Math.max(1, lines.length)));
+  return lines.map((x) => (x.length <= share ? x : `${x.slice(0, share - 1).replace(/\s+\S*$/, '')}…`)).join('\n');
+}
+
 export function tutorMessages({ message, mode, level, grade, history, fragments }) {
   const lvl = mode === 'socratic' ? Math.min(2, level) : 0;
   const instruction = MODES[`${mode}-${lvl}`] || MODES['socratic-0'];
-  const context = fragments.map((f) => `[${f.title}] ${f.text}`).join('\n');
+  const context = contextBlock(fragments.slice(0, 3));
   const msgs = [
     { role: 'system', content: `${SYSTEM(grade)}\n${instruction}\n\nФРАГМЕНТЫ:\n${context}` },
     ...history.slice(-6),

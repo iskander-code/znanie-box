@@ -31,7 +31,7 @@ export async function login(pin, server) {
     if (!r.ok || !data.token) throw new Error(data.error || 'Не удалось войти');
     return data.token;
   }
-  if ((await hashPin(pin)) !== PIN_HASH) throw new Error('Неверный PIN');
+  if ((await hashPin(pin)) !== localPinHash()) throw new Error('Неверный PIN');
   return 'local';
 }
 
@@ -40,6 +40,31 @@ const LS = {
   get(k, d) { try { return JSON.parse(localStorage.getItem(k)) ?? d; } catch { return d; } },
   set(k, v) { try { localStorage.setItem(k, JSON.stringify(v)); } catch { /* приватный режим */ } },
 };
+
+// PIN, сменённый в кабинете на сайте без коробки, хранится хэшем в этом браузере.
+const localPinHash = () => LS.get('pin-hash', PIN_HASH);
+export async function changeLocalPin(oldPin, newPin) {
+  if (!/^\d{4,8}$/.test(String(newPin).trim())) throw new Error('Новый PIN — это 4–8 цифр');
+  if ((await hashPin(oldPin)) !== localPinHash()) throw new Error('Старый PIN неверный');
+  LS.set('pin-hash', await hashPin(newPin));
+}
+
+// Ошибки в прогнозах «Что будет, если…» на этом устройстве (когда нет коробки).
+export function recordLocalSim(graphId, title, total, wrong) {
+  if (!graphId || !total) return;
+  const all = LS.get('sim-stats', {});
+  const s = (all[graphId] ||= { title, runs: 0, predictions: 0, wrong: 0, factors: {} });
+  s.runs += 1; s.predictions += total; s.wrong += wrong.length;
+  for (const f of wrong) s.factors[f] = (s.factors[f] || 0) + 1;
+  LS.set('sim-stats', all);
+}
+export function localSims(limit = 10) {
+  return Object.entries(LS.get('sim-stats', {})).map(([graphId, s]) => ({
+    graphId, title: s.title, runs: s.runs, predictions: s.predictions, wrong: s.wrong,
+    errorRate: s.predictions ? Math.round((s.wrong / s.predictions) * 100) / 100 : 0,
+    hardest: Object.entries(s.factors).sort((a, b) => b[1] - a[1]).slice(0, 3).map(([f]) => f),
+  })).sort((a, b) => b.errorRate - a.errorRate || b.runs - a.runs).slice(0, limit);
+}
 
 export function recordLocal(docId, title, kind) {
   if (!docId) return;
@@ -56,6 +81,6 @@ export function localSummary(limit = 10) {
     .slice(0, limit);
 }
 
-export const resetLocalStats = () => LS.set('topic-stats', {});
+export const resetLocalStats = () => { LS.set('topic-stats', {}); LS.set('sim-stats', {}); };
 export const localExam = () => LS.get('exam-local', false);
 export const setLocalExam = (on) => LS.set('exam-local', !!on);

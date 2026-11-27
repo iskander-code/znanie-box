@@ -48,6 +48,10 @@ class Teacher:
             self.state = {}
         self.state.setdefault("exam", False)
         self.state.setdefault("stats", {})
+        self.state.setdefault("sims", {})
+        # PIN, сменённый в кабинете учителя, хранится хэшем в state.json и важнее PIN по умолчанию.
+        if self.state.get("pin_hash") and not os.environ.get("ZNANIE_TEACHER_PIN_HASH") and pin_hash == PIN_HASH:
+            self.pin_hash = self.state["pin_hash"]
 
     def _save(self):
         self.file.parent.mkdir(parents=True, exist_ok=True)
@@ -74,6 +78,19 @@ class Teacher:
                 self.locked_until = now + LOCK_SECONDS
                 return None, f"Неверный PIN. Вход заблокирован на {LOCK_SECONDS} с."
             return None, f"Неверный PIN. Осталось попыток: {MAX_TRIES - self.fails}."
+
+    def change_pin(self, old: str, new: str) -> tuple[bool, str]:
+        """Смена PIN из кабинета учителя: нужен старый PIN, новый — 4–8 цифр."""
+        new = str(new).strip()
+        if not new.isdigit() or not 4 <= len(new) <= 8:
+            return False, "Новый PIN — это 4–8 цифр"
+        with self.lock:
+            if not hmac.compare_digest(hash_pin(str(old)), self.pin_hash):
+                return False, "Старый PIN неверный"
+            self.pin_hash = hash_pin(new)
+            self.state["pin_hash"] = self.pin_hash
+            self._save()
+        return True, "PIN изменён"
 
     def check(self, token: str | None) -> bool:
         if not token:
@@ -112,6 +129,29 @@ class Teacher:
             s[kind] = s.get(kind, 0) + 1
             self._save()
 
+    def record_sim(self, graph_id: str, title: str, total: int, wrong: list[str]):
+        """Прогноз ученика в «Что будет, если…»: сколько факторов угадал. Без имён — только по схеме."""
+        if not graph_id or total <= 0:
+            return
+        with self.lock:
+            s = self.state["sims"].setdefault(graph_id, {"title": title, "runs": 0, "predictions": 0, "wrong": 0, "factors": {}})
+            s["runs"] += 1
+            s["predictions"] += int(total)
+            s["wrong"] += len(wrong)
+            for f in wrong[:20]:
+                key = str(f)[:60]
+                s["factors"][key] = s["factors"].get(key, 0) + 1
+            self._save()
+
+    def sims_summary(self, limit: int = 10) -> list[dict]:
+        """Схемы, где ученики чаще ошибаются в прогнозе, и самые «коварные» факторы."""
+        with self.lock:
+            rows = [{"graphId": k, **v} for k, v in self.state["sims"].items()]
+        for r in rows:
+            r["errorRate"] = round(r["wrong"] / r["predictions"], 2) if r["predictions"] else 0
+            r["hardest"] = [f for f, _ in sorted(r.pop("factors").items(), key=lambda x: -x[1])[:3]]
+        return sorted(rows, key=lambda r: (-r["errorRate"], -r["runs"]))[:limit]
+
     def summary(self, limit: int = 10) -> list[dict]:
         with self.lock:
             rows = [{"docId": k, **v} for k, v in self.state["stats"].items()]
@@ -123,6 +163,7 @@ class Teacher:
     def reset_stats(self):
         with self.lock:
             self.state["stats"] = {}
+            self.state["sims"] = {}
             self._save()
 
 
