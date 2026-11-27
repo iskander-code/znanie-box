@@ -1,0 +1,140 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Закон Ома и электрическая цепь</title>
+<style>
+  :root { --bg: #F8FAFC; --ink: #0F172A; --muted: #475569; --card: #FFFFFF; --line: #CBD5E1; --wire: #334155; --accent: #0072B2; --hot: #D55E00; --ok: #009E73; }
+  @media (prefers-color-scheme: dark) { :root { --bg: #0F172A; --ink: #F1F5F9; --muted: #94A3B8; --card: #1E293B; --line: #334155; --wire: #CBD5E1; --accent: #56B4E9; } }
+  * { box-sizing: border-box; }
+  body { margin: 0; font: 16px/1.5 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; background: var(--bg); color: var(--ink); }
+  main { display: grid; grid-template-columns: minmax(0, 1fr) 300px; gap: 16px; padding: 14px; max-width: 1200px; margin: 0 auto; }
+  h1 { font-size: 1.2rem; margin: 0 0 6px; grid-column: 1 / -1; }
+  .stage { background: var(--card); border: 1px solid var(--line); border-radius: 14px; padding: 8px; min-width: 0; }
+  canvas { width: 100%; height: auto; display: block; aspect-ratio: 16 / 10; }
+  .panel { display: grid; gap: 12px; align-content: start; }
+  .card { background: var(--card); border: 1px solid var(--line); border-radius: 14px; padding: 12px 14px; }
+  label { display: grid; gap: 4px; font-weight: 600; }
+  input[type=range] { width: 100%; min-height: 44px; accent-color: var(--accent); }
+  .val { font-variant-numeric: tabular-nums; color: var(--accent); }
+  .big { font-size: 1.6rem; font-weight: 700; font-variant-numeric: tabular-nums; }
+  .formula { font-family: ui-monospace, Consolas, monospace; background: var(--bg); padding: 6px 10px; border-radius: 8px; }
+  .warn { color: var(--hot); font-weight: 700; }
+  .muted { color: var(--muted); font-size: .9rem; }
+  button { font: inherit; min-height: 44px; padding: 8px 14px; border-radius: 10px; border: 1px solid var(--line); background: var(--card); color: var(--ink); cursor: pointer; }
+  ol { margin: 0; padding-left: 1.2em; } li { margin-bottom: 6px; }
+  @media (max-width: 760px) { main { grid-template-columns: 1fr; padding: 10px; } }
+</style>
+</head>
+<body>
+<main>
+  <h1>⚡ Закон Ома и электрическая цепь</h1>
+  <div class="stage"><canvas id="c" width="800" height="500" role="img" aria-label="Электрическая цепь: батарея, провода и резистор. Точки — движущиеся электроны."></canvas></div>
+  <div class="panel">
+    <div class="card">
+      <label for="u">Напряжение U: <span class="val" id="uv"></span></label>
+      <input id="u" type="range" min="0" max="12" step="0.5" value="4.5" aria-describedby="uv">
+      <label for="r">Сопротивление R: <span class="val" id="rv"></span></label>
+      <input id="r" type="range" min="1" max="100" step="1" value="20" aria-describedby="rv">
+    </div>
+    <div class="card" aria-live="polite">
+      <div class="muted">Сила тока</div>
+      <div class="big" id="iv"></div>
+      <div class="formula" id="calc"></div>
+      <div class="muted" style="margin-top:8px">Мощность (нагрев резистора): <strong id="pv"></strong></div>
+      <div id="state" style="margin-top:6px"></div>
+    </div>
+    <div class="card">
+      <strong>Попробуй</strong>
+      <ol class="muted">
+        <li>Увеличь напряжение вдвое. Во сколько раз изменилась сила тока?</li>
+        <li>Увеличь сопротивление. Что стало с током и скоростью электронов?</li>
+        <li>При каких U и R резистор перегревается? Почему в цепь ставят предохранитель?</li>
+      </ol>
+      <button id="pause" type="button" aria-pressed="false">⏸ Пауза</button>
+    </div>
+  </div>
+</main>
+<script>
+  // Модель: I = U / R, P = U · I. Электроны движутся по проводу со скоростью, пропорциональной силе тока.
+  const $ = (id) => document.getElementById(id);
+  const cv = $('c'), ctx = cv.getContext('2d');
+  const reduce = matchMedia('(prefers-reduced-motion: reduce)').matches;
+  const css = (n) => getComputedStyle(document.documentElement).getPropertyValue(n).trim();
+  const PATH = [[120, 110], [680, 110], [680, 390], [120, 390]]; // прямоугольный контур цепи
+  const LEN = PATH.reduce((s, p, i) => { const q = PATH[(i + 1) % PATH.length]; return s + Math.hypot(q[0] - p[0], q[1] - p[1]); }, 0);
+  const electrons = Array.from({ length: 46 }, (_, i) => i * LEN / 46);
+  let paused = false, heat = 0;
+
+  function pointAt(d) {
+    d = ((d % LEN) + LEN) % LEN;
+    for (let i = 0; i < PATH.length; i++) {
+      const p = PATH[i], q = PATH[(i + 1) % PATH.length];
+      const seg = Math.hypot(q[0] - p[0], q[1] - p[1]);
+      if (d <= seg) return [p[0] + (q[0] - p[0]) * d / seg, p[1] + (q[1] - p[1]) * d / seg];
+      d -= seg;
+    }
+    return PATH[0];
+  }
+  const values = () => { const U = +$('u').value, R = +$('r').value, I = U / R; return { U, R, I, P: U * I }; };
+
+  function update() {
+    const { U, R, I, P } = values();
+    $('uv').textContent = `${U.toFixed(1)} В`;
+    $('rv').textContent = `${R} Ом`;
+    $('iv').textContent = `${(I * 1000).toFixed(0)} мА`;
+    $('calc').textContent = `I = U / R = ${U.toFixed(1)} / ${R} = ${I.toFixed(3)} А`;
+    $('pv').textContent = `${P.toFixed(2)} Вт`;
+    $('state').innerHTML = P > 6 ? '<span class="warn">🔥 Резистор перегрет — изоляция может расплавиться!</span>'
+      : P > 2.5 ? '<span class="warn">♨ Резистор заметно нагревается</span>' : '<span style="color:var(--ok)">✓ Нагрев в норме</span>';
+  }
+
+  function draw(dt) {
+    const { U, I, P } = values();
+    heat += (Math.min(1, P / 7) - heat) * Math.min(1, dt * 2); // резистор нагревается и остывает не сразу
+    ctx.clearRect(0, 0, cv.width, cv.height);
+    ctx.lineWidth = 10; ctx.lineJoin = 'round'; ctx.strokeStyle = css('--wire');
+    ctx.beginPath(); PATH.forEach(([x, y], i) => (i ? ctx.lineTo(x, y) : ctx.moveTo(x, y))); ctx.closePath(); ctx.stroke();
+    // батарея слева
+    ctx.fillStyle = css('--card'); ctx.fillRect(95, 200, 50, 100);
+    ctx.lineWidth = 6; ctx.strokeStyle = css('--wire');
+    ctx.beginPath(); ctx.moveTo(85, 235); ctx.lineTo(155, 235); ctx.stroke();
+    ctx.lineWidth = 3; ctx.beginPath(); ctx.moveTo(100, 265); ctx.lineTo(140, 265); ctx.stroke();
+    ctx.fillStyle = css('--ink'); ctx.font = 'bold 22px system-ui'; ctx.textAlign = 'center';
+    ctx.fillText(`${U.toFixed(1)} В`, 120, 330); ctx.fillText('+', 170, 240); ctx.fillText('−', 170, 272);
+    // резистор сверху: цвет от серого к оранжевому по нагреву
+    const g = Math.round(150 - heat * 90), b = Math.round(160 - heat * 160);
+    ctx.fillStyle = `rgb(${Math.round(150 + heat * 105)}, ${g}, ${b})`;
+    if (heat > 0.25) { ctx.shadowColor = '#D55E00'; ctx.shadowBlur = 40 * heat; }
+    ctx.fillRect(330, 85, 140, 50); ctx.shadowBlur = 0;
+    ctx.strokeStyle = css('--wire'); ctx.lineWidth = 3; ctx.strokeRect(330, 85, 140, 50);
+    ctx.fillStyle = css('--ink'); ctx.font = 'bold 20px system-ui';
+    ctx.fillText(`R = ${$('r').value} Ом`, 400, 165);
+    // амперметр снизу
+    ctx.fillStyle = css('--card'); ctx.beginPath(); ctx.arc(400, 390, 38, 0, Math.PI * 2); ctx.fill();
+    ctx.strokeStyle = css('--accent'); ctx.lineWidth = 4; ctx.stroke();
+    ctx.fillStyle = css('--accent'); ctx.font = 'bold 18px system-ui'; ctx.fillText('A', 400, 382);
+    ctx.font = '15px system-ui'; ctx.fillText(`${(I * 1000).toFixed(0)} мА`, 400, 402);
+    // электроны: движутся от «−» к «+», скорость пропорциональна току
+    const speed = reduce ? 0 : I * 900;
+    ctx.fillStyle = css('--accent');
+    electrons.forEach((d, k) => {
+      if (!paused) electrons[k] = d - speed * dt;
+      const [x, y] = pointAt(electrons[k]);
+      ctx.beginPath(); ctx.arc(x, y, 5, 0, Math.PI * 2); ctx.fill();
+    });
+    ctx.fillStyle = css('--muted'); ctx.font = '15px system-ui'; ctx.textAlign = 'left';
+    ctx.fillText(reduce ? 'Анимация выключена (настройка «уменьшить движение»)' : 'Точки — электроны: чем больше ток, тем быстрее они движутся', 120, 470);
+  }
+
+  let last = performance.now();
+  function loop(t) { const dt = Math.min(0.05, (t - last) / 1000); last = t; draw(dt); requestAnimationFrame(loop); }
+  $('u').addEventListener('input', update);
+  $('r').addEventListener('input', update);
+  $('pause').addEventListener('click', (e) => { paused = !paused; e.target.textContent = paused ? '▶ Дальше' : '⏸ Пауза'; e.target.setAttribute('aria-pressed', String(paused)); });
+  update();
+  requestAnimationFrame(loop);
+</script>
+</body>
+</html>

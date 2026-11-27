@@ -1,0 +1,174 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Парниковый эффект и температура океана</title>
+<style>
+  :root { --bg: #F8FAFC; --ink: #0F172A; --muted: #475569; --card: #FFFFFF; --line: #CBD5E1; --accent: #0072B2; --sun: #E69F00; --ir: #D55E00; --ok: #009E73; }
+  @media (prefers-color-scheme: dark) { :root { --bg: #0F172A; --ink: #F1F5F9; --muted: #94A3B8; --card: #1E293B; --line: #334155; --accent: #56B4E9; } }
+  * { box-sizing: border-box; }
+  body { margin: 0; font: 16px/1.5 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; background: var(--bg); color: var(--ink); }
+  main { display: grid; grid-template-columns: minmax(0, 1fr) 310px; gap: 16px; padding: 14px; max-width: 1200px; margin: 0 auto; }
+  h1 { font-size: 1.2rem; margin: 0 0 6px; grid-column: 1 / -1; }
+  .stage { background: var(--card); border: 1px solid var(--line); border-radius: 14px; padding: 8px; min-width: 0; }
+  canvas { width: 100%; height: auto; display: block; aspect-ratio: 16 / 10; border-radius: 10px; }
+  .panel { display: grid; gap: 12px; align-content: start; }
+  .card { background: var(--card); border: 1px solid var(--line); border-radius: 14px; padding: 12px 14px; }
+  label { display: grid; gap: 4px; font-weight: 600; }
+  input[type=range] { width: 100%; min-height: 44px; accent-color: var(--accent); }
+  .val { font-variant-numeric: tabular-nums; color: var(--accent); }
+  .big { font-size: 1.5rem; font-weight: 700; font-variant-numeric: tabular-nums; }
+  .muted { color: var(--muted); font-size: .9rem; }
+  .row { display: flex; gap: 8px; flex-wrap: wrap; }
+  button { font: inherit; min-height: 44px; padding: 8px 12px; border-radius: 10px; border: 1px solid var(--line); background: var(--card); color: var(--ink); cursor: pointer; }
+  ol { margin: 0; padding-left: 1.2em; } li { margin-bottom: 6px; }
+  .legend span { display: inline-flex; align-items: center; gap: 6px; margin-right: 12px; }
+  .sw { width: 22px; height: 4px; display: inline-block; border-radius: 2px; }
+  @media (max-width: 760px) { main { grid-template-columns: 1fr; padding: 10px; } }
+</style>
+</head>
+<body>
+<main>
+  <h1>🌍 Парниковый эффект и температура океана</h1>
+  <div class="stage">
+    <canvas id="c" width="800" height="500" role="img" aria-label="Солнце, атмосфера с молекулами CO2, океан и коралловый риф. Жёлтые лучи — солнечный свет, оранжевые — тепло от Земли."></canvas>
+    <p class="muted legend"><span><i class="sw" style="background:var(--sun)"></i>солнечный свет</span><span><i class="sw" style="background:var(--ir)"></i>тепло от Земли</span><span>● CO₂ в атмосфере</span></p>
+  </div>
+  <div class="panel">
+    <div class="card">
+      <label for="co2">Углекислый газ CO₂: <span class="val" id="co2v"></span></label>
+      <input id="co2" type="range" min="280" max="1000" step="10" value="420">
+      <label for="alb">Отражение солнечных лучей (лёд, снег, облака): <span class="val" id="albv"></span></label>
+      <input id="alb" type="range" min="20" max="40" step="1" value="30">
+      <div class="row">
+        <button type="button" data-preset="280,32">1850 год</button>
+        <button type="button" data-preset="420,30">Сегодня</button>
+        <button type="button" data-preset="800,27">Если не сокращать выбросы</button>
+      </div>
+    </div>
+    <div class="card" aria-live="polite">
+      <div class="muted">Средняя температура Земли</div>
+      <div class="big" id="tv"></div>
+      <div class="muted" style="margin-top:6px">Температура воды у тропического рифа</div>
+      <div class="big" id="ov"></div>
+      <div id="reef" style="margin-top:6px"></div>
+    </div>
+    <div class="card">
+      <strong>Попробуй</strong>
+      <ol class="muted">
+        <li>Увеличь CO₂ вдвое (с 420 до 840). На сколько градусов потеплело?</li>
+        <li>Уменьши отражение — как будто растаяли ледники. Что стало с температурой?</li>
+        <li>При какой температуре воды кораллы начинают обесцвечиваться?</li>
+      </ol>
+    </div>
+  </div>
+</main>
+<script>
+  // Упрощённая модель для урока:
+  //   потепление ≈ 3 °C на каждое удвоение CO₂ относительно 280 ppm (чувствительность климата);
+  //   каждый процент отражения сверх 30% охлаждает примерно на 0,6 °C, меньше 30% — нагревает;
+  //   вода у тропического рифа ≈ 27 °C + 0,8 × потепление. Кораллы: до 29 °C — здоровы,
+  //   29–30,5 °C — стресс, выше 30,5 °C — обесцвечивание, выше 32 °C — гибель.
+  const $ = (id) => document.getElementById(id);
+  const cv = $('c'), ctx = cv.getContext('2d');
+  const reduce = matchMedia('(prefers-reduced-motion: reduce)').matches;
+  const css = (n) => getComputedStyle(document.documentElement).getPropertyValue(n).trim();
+  const rays = [];
+  let shown = 0; // плавное изменение температуры
+
+  function model() {
+    const co2 = +$('co2').value, alb = +$('alb').value;
+    const warming = 3 * Math.log2(co2 / 280) - (alb - 30) * 0.6;
+    const earth = 14 + warming;
+    const ocean = 27 + 0.8 * warming;
+    const reef = ocean < 29 ? { t: '🪸 Риф здоров: кораллы яркие', c: '#009E73', k: 0 }
+      : ocean < 30.5 ? { t: '⚠ Кораллы в стрессе: вода слишком тёплая', c: '#E69F00', k: 1 }
+        : ocean < 32 ? { t: '🤍 Обесцвечивание: кораллы теряют водоросли и бледнеют', c: '#D55E00', k: 2 }
+          : { t: '✗ Гибель рифа: кораллы погибают от перегрева', c: '#D55E00', k: 3 };
+    return { co2, alb, warming, earth, ocean, reef };
+  }
+
+  function update() {
+    const m = model();
+    $('co2v').textContent = `${m.co2} ppm`;
+    $('albv').textContent = `${m.alb}%`;
+    $('tv').textContent = `${m.earth.toFixed(1)} °C (${m.warming >= 0 ? '+' : ''}${m.warming.toFixed(1)} °C к 1850 г.)`;
+    $('ov').textContent = `${m.ocean.toFixed(1)} °C`;
+    $('reef').innerHTML = `<strong style="color:${m.reef.c}">${m.reef.t}</strong>`;
+  }
+
+  function spawn(m) {
+    if (rays.length > 40) return;
+    const x = 80 + Math.random() * 640;
+    rays.push({ x, y: 0, vy: 1, kind: 'sun' });
+  }
+
+  function draw(dt) {
+    const m = model();
+    shown += (m.warming - shown) * Math.min(1, dt * 1.5);
+    const W = cv.width, H = cv.height, sea = 340;
+    // небо и атмосфера
+    const sky = ctx.createLinearGradient(0, 0, 0, sea);
+    sky.addColorStop(0, '#0b1d3a'); sky.addColorStop(1, '#3b6ea8');
+    ctx.fillStyle = sky; ctx.fillRect(0, 0, W, sea);
+    ctx.fillStyle = '#E69F00'; ctx.beginPath(); ctx.arc(70, 50, 36, 0, Math.PI * 2); ctx.fill();
+    // слой атмосферы с молекулами CO₂: их больше при большей концентрации
+    const n = Math.round((m.co2 - 200) / 18);
+    ctx.fillStyle = 'rgba(255,255,255,0.85)';
+    for (let i = 0; i < n; i++) { const x = (i * 97) % W, y = 120 + ((i * 53) % 90); ctx.beginPath(); ctx.arc(x, y, 3.5, 0, Math.PI * 2); ctx.fill(); }
+    ctx.fillStyle = 'rgba(255,255,255,0.75)'; ctx.font = '15px system-ui'; ctx.fillText('атмосфера: молекулы CO₂', 560, 110);
+    // лёд и облака отражают часть света: белая полоса тем шире, чем больше отражение
+    ctx.fillStyle = 'rgba(255,255,255,0.9)'; ctx.fillRect(W - (m.alb - 18) * 9, sea - 14, (m.alb - 18) * 9, 14);
+    // океан: от синего к бирюзово-зелёному при нагреве
+    const hot = Math.max(0, Math.min(1, (m.ocean - 26.5) / 6));
+    ctx.fillStyle = `rgb(${Math.round(0 + hot * 40)}, ${Math.round(90 + hot * 70)}, ${Math.round(170 - hot * 60)})`;
+    ctx.fillRect(0, sea, W, H - sea);
+    // коралловый риф
+    const reefColor = ['#FF7F50', '#F4A261', '#F1F1F1', '#8d8d8d'][m.reef.k];
+    for (let i = 0; i < 9; i++) {
+      const x = 120 + i * 65, h = 40 + ((i * 37) % 35);
+      ctx.strokeStyle = reefColor; ctx.lineWidth = 7; ctx.lineCap = 'round';
+      ctx.beginPath(); ctx.moveTo(x, H - 10); ctx.lineTo(x, H - 10 - h); ctx.moveTo(x, H - 30 - h / 3); ctx.lineTo(x - 16, H - 40 - h / 2); ctx.moveTo(x, H - 20 - h / 2); ctx.lineTo(x + 16, H - 34 - h * 0.7); ctx.stroke();
+    }
+    ctx.fillStyle = '#fff'; ctx.font = 'bold 18px system-ui'; ctx.fillText(`вода ${m.ocean.toFixed(1)} °C`, 20, sea + 30);
+    // лучи: солнечные вниз; у поверхности часть отражается, остальное нагревает и уходит вверх теплом,
+    // которое молекулы CO₂ частично задерживают и возвращают вниз
+    if (!reduce && Math.random() < dt * 14) spawn(m);
+    for (let i = rays.length - 1; i >= 0; i--) {
+      const r = rays[i];
+      if (!reduce) r.y += r.vy * 260 * dt;
+      if (r.kind === 'sun' && r.y >= sea - 14) {
+        if (Math.random() * 100 < m.alb) { r.kind = 'reflect'; r.vy = -1; }
+        else { r.kind = 'ir'; r.vy = -1; r.y = sea - 14; }
+      } else if (r.kind === 'ir' && r.y < 200 && r.y > 190 && Math.random() < (m.co2 - 200) / 1200) {
+        r.vy = 1; r.kind = 'trap';
+      } else if (r.kind === 'trap' && r.y >= sea - 14) {
+        r.kind = 'ir'; r.vy = -1;
+      }
+      if (r.y < -20 || r.y > H) { rays.splice(i, 1); continue; }
+      ctx.strokeStyle = r.kind === 'sun' || r.kind === 'reflect' ? '#E69F00' : '#D55E00';
+      ctx.lineWidth = 3; ctx.setLineDash(r.kind === 'reflect' ? [4, 4] : r.kind === 'sun' ? [] : [10, 6]);
+      ctx.beginPath(); ctx.moveTo(r.x, r.y); ctx.lineTo(r.x, r.y - 22 * r.vy); ctx.stroke();
+    }
+    ctx.setLineDash([]);
+    if (reduce) { ctx.fillStyle = '#fff'; ctx.font = '15px system-ui'; ctx.fillText('Анимация выключена (настройка «уменьшить движение»)', 20, 30 + 60); }
+    // термометр
+    ctx.fillStyle = 'rgba(0,0,0,0.35)'; ctx.fillRect(W - 70, 20, 50, 200);
+    const level = Math.max(0, Math.min(1, (shown + 1) / 7));
+    ctx.fillStyle = '#D55E00'; ctx.fillRect(W - 55, 210 - level * 180, 20, level * 180);
+    ctx.fillStyle = '#fff'; ctx.font = 'bold 15px system-ui'; ctx.fillText(`${shown >= 0 ? '+' : ''}${shown.toFixed(1)}°`, W - 68, 240);
+  }
+
+  let last = performance.now();
+  function loop(t) { const dt = Math.min(0.05, (t - last) / 1000); last = t; draw(dt); requestAnimationFrame(loop); }
+  ['co2', 'alb'].forEach((id) => $(id).addEventListener('input', update));
+  document.querySelectorAll('[data-preset]').forEach((b) => b.addEventListener('click', () => {
+    const [c, a] = b.dataset.preset.split(',');
+    $('co2').value = c; $('alb').value = a; update();
+  }));
+  update();
+  requestAnimationFrame(loop);
+</script>
+</body>
+</html>

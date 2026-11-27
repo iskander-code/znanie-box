@@ -1,0 +1,9 @@
+[
+  {"id": "history", "name": "История Казахстана", "icon": "🏛"},
+  {"id": "physics", "name": "Физика", "icon": "⚡"},
+  {"id": "algebra", "name": "Алгебра", "icon": "𝑥"},
+  {"id": "geometry", "name": "Геометрия", "icon": "△"},
+  {"id": "biology", "name": "Биология", "icon": "🌱"},
+  {"id": "chemistry", "name": "Химия", "icon": "⚗"},
+  {"id": "geography", "name": "География", "icon": "🌍"}
+]
